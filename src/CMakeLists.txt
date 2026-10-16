@@ -8,6 +8,8 @@ add_library(qtscrcpy
     qtscrcpy/commandresult.h
     qtscrcpy/commandrunner.cpp
     qtscrcpy/commandrunner.h
+    qtscrcpy/devicemonitor.cpp
+    qtscrcpy/devicemonitor.h
     qtscrcpy/locate.cpp
     qtscrcpy/locate.h
     qtscrcpy/scrcpy.cpp

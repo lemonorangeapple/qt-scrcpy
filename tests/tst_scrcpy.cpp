@@ -18,6 +18,9 @@ private slots:
     void detectsVersion();
     void startPassesArgumentsAndAdbPath();
     void legacyVersionDropsUnsupportedOptions();
+    void cameraMirroringPassesCameraArguments();
+    void cameraMirroringRefusedOnOldScrcpy();
+    void conflictingOptionsRefused();
     void streamsOutputLines();
     void stopTerminatesGracefully();
     void stopKillsAfterGracePeriod();
@@ -126,6 +129,56 @@ void TstScrcpy::legacyVersionDropsUnsupportedOptions()
     QVERIFY(!logLines().contains("--no-audio"));
     scrcpy.stop();
     QTRY_COMPARE(scrcpy.state(), Scrcpy::State::Stopped);
+}
+
+void TstScrcpy::cameraMirroringPassesCameraArguments()
+{
+    Scrcpy scrcpy;
+    scrcpy.setExecutable(fakeScrcpy()); // reports 2.4
+    ScrcpyOptions options = ScrcpyOptions::forCamera("SER", CameraFacing::Front);
+    options.cameraFps = 30;
+    options.showTouches = true; // needs control: must not reach scrcpy in camera mode
+
+    QVERIFY(startAndWaitUntilReady(scrcpy, options));
+    const QStringList expected{"--serial=SER", "--video-source=camera", "--camera-facing=front", "--camera-fps=30"};
+    QCOMPARE(logLines().mid(0, 4), expected);
+    QVERIFY(!logLines().contains("--show-touches"));
+    scrcpy.stop();
+    QTRY_COMPARE(scrcpy.state(), Scrcpy::State::Stopped);
+}
+
+void TstScrcpy::cameraMirroringRefusedOnOldScrcpy()
+{
+    qputenv("FAKE_SCRCPY_VERSION", "2.1");
+    Scrcpy scrcpy;
+    scrcpy.setExecutable(fakeScrcpy());
+    QSignalSpy errors(&scrcpy, &Scrcpy::errorOccurred);
+
+    // Falling back to the screen would silently do something else than asked for.
+    QVERIFY(!scrcpy.start(ScrcpyOptions::forCamera("SER")));
+    QCOMPARE(errors.count(), 1);
+    QVERIFY2(errors.at(0).at(0).toString().contains("2.2 or newer (found 2.1)"),
+             qPrintable(errors.at(0).at(0).toString()));
+    QCOMPARE(scrcpy.state(), Scrcpy::State::Stopped);
+    QVERIFY(logLines().isEmpty()); // never launched
+
+    // The same device can still be mirrored as a screen.
+    QVERIFY(startAndWaitUntilReady(scrcpy, ScrcpyOptions::forScreen("SER")));
+    scrcpy.stop();
+    QTRY_COMPARE(scrcpy.state(), Scrcpy::State::Stopped);
+}
+
+void TstScrcpy::conflictingOptionsRefused()
+{
+    Scrcpy scrcpy;
+    scrcpy.setExecutable(fakeScrcpy());
+    QSignalSpy errors(&scrcpy, &Scrcpy::errorOccurred);
+
+    ScrcpyOptions options = ScrcpyOptions::forCamera("SER");
+    options.cameraId = "0"; // facing defaults to Back; scrcpy rejects both together
+    QVERIFY(!scrcpy.start(options));
+    QCOMPARE(errors.count(), 1);
+    QVERIFY(logLines().isEmpty());
 }
 
 void TstScrcpy::streamsOutputLines()

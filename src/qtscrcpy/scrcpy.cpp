@@ -90,7 +90,13 @@ bool Scrcpy::start(const ScrcpyOptions &options)
         return false;
     }
 
-    m_arguments = options.toArguments(version());
+    const ScrcpyVersion scrcpyVersion = version();
+    const QString problem = options.validate(scrcpyVersion);
+    if (!problem.isEmpty()) {
+        emit errorOccurred(problem);
+        return false;
+    }
+    m_arguments = options.toArguments(scrcpyVersion);
 
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
     if (!m_adbExecutable.isEmpty())

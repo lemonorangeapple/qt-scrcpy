@@ -395,6 +395,11 @@ QString Adb::getProp(const QString &serial, const QString &key) const
     return result.ok() ? result.text() : QString();
 }
 
+int Adb::androidSdkVersion(const QString &serial) const
+{
+    return getProp(serial, QStringLiteral("ro.build.version.sdk")).toInt();
+}
+
 QMap<QString, QString> Adb::properties(const QString &serial, CommandResult *result) const
 {
     static const QRegularExpression line(QStringLiteral(R"(^\[(.*?)\]: \[(.*)\]$)"),
@@ -513,6 +518,16 @@ void Adb::connectDeviceAsync(const QString &address, Callback callback)
         if (callback)
             callback(checkConnect(result));
     }, kConnectTimeoutMs);
+}
+
+void Adb::androidSdkVersionAsync(const QString &serial, std::function<void(int)> callback)
+{
+    runAsync(deviceArgs(serial, {QStringLiteral("shell"), QStringLiteral("getprop"),
+                                 QStringLiteral("ro.build.version.sdk")}),
+             [callback = std::move(callback)](const CommandResult &result) {
+                 if (callback)
+                     callback(result.ok() ? result.text().toInt() : 0);
+             });
 }
 
 void Adb::shellAsync(const QString &serial, const QString &command, Callback callback, int timeoutMs)

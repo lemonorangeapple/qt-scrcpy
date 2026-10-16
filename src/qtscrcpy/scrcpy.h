@@ -46,7 +46,8 @@ public:
     QStringList arguments() const { return m_arguments; }
 
     // Launches scrcpy. Returns false (and emits errorOccurred) when scrcpy is already
-    // running or its executable is missing; a launch that fails later is reported
+    // running, its executable is missing or the options do not fit this scrcpy version
+    // (ScrcpyOptions::validate()); a launch that fails later is reported
     // through errorOccurred only. Detects the scrcpy version first, which briefly
     // blocks the first time.
     bool start(const ScrcpyOptions &options);

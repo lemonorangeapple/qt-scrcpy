@@ -20,6 +20,7 @@ private slots:
     void devices();
     void connectAndPair();
     void deviceInfo();
+    void androidSdkVersion();
     void packages();
     void install();
     void screenshot();
@@ -149,6 +150,26 @@ void TstAdb::deviceInfo()
     QCOMPARE(props.size(), 2);
     QCOMPARE(props.value("ro.product.model"), QStringLiteral("Fake Phone"));
     QCOMPARE(props.value("ro.build.version.release"), QStringLiteral("14")); // CR stripped
+}
+
+void TstAdb::androidSdkVersion()
+{
+    QCOMPARE(m_adb->androidSdkVersion("SER"), 34);
+
+    qputenv("FAKE_ADB_SDK", "30");
+    QCOMPARE(m_adb->androidSdkVersion("SER"), 30);
+
+    int async = -1;
+    m_adb->androidSdkVersionAsync("SER", [&async](int sdk) { async = sdk; });
+    QTRY_COMPARE(async, 30);
+    qunsetenv("FAKE_ADB_SDK");
+
+    // Unreadable -> 0, so callers can tell "unknown" from a real level.
+    qputenv("FAKE_ADB_FAIL", "1");
+    QCOMPARE(m_adb->androidSdkVersion("SER"), 0);
+    async = -1;
+    m_adb->androidSdkVersionAsync("SER", [&async](int sdk) { async = sdk; });
+    QTRY_COMPARE(async, 0);
 }
 
 void TstAdb::packages()

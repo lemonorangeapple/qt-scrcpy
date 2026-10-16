@@ -3,6 +3,7 @@
 #   FAKE_ADB_LOG      file that receives one tab-separated line per invocation
 #   FAKE_ADB_DEVICES  file whose content is the device list printed by `devices`
 #   FAKE_ADB_FAIL     if set, every command fails with exit status 1
+#   FAKE_ADB_SDK      Android API level reported by getprop (default 34)
 if [ -n "$FAKE_ADB_LOG" ]; then
     { printf '%s\t' "$@"; echo; } >> "$FAKE_ADB_LOG"
 fi
@@ -53,6 +54,7 @@ shell)
     "ip -f inet addr show wlan0")
         printf '22: wlan0: <BROADCAST,MULTICAST,UP>\n    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0\n' ;;
     "getprop ro.product.model") echo "Fake Phone" ;;
+    "getprop ro.build.version.sdk") echo "${FAKE_ADB_SDK:-34}" ;;
     "getprop")
         printf '[ro.product.model]: [Fake Phone]\r\n[ro.build.version.release]: [14]\r\n' ;;
     "pm list packages"*)

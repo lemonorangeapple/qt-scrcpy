@@ -37,10 +37,28 @@ struct QTSCRCPY_EXPORT ScrcpyVersion
     friend bool operator>=(const ScrcpyVersion &a, const ScrcpyVersion &b) { return !(a < b); }
 };
 
+// What scrcpy captures.
+enum class VideoSource {
+    Display, // the device screen (default)
+    Camera,  // a device camera; needs scrcpy >= 2.2 and Android 12+
+};
+
+enum class CameraFacing { Any, Front, Back, External };
+
 // The scrcpy command line options exposed by this wrapper. Defaults mean "scrcpy's default".
 struct QTSCRCPY_EXPORT ScrcpyOptions
 {
+    // Camera mirroring needs at least this scrcpy release and this Android API level (12).
+    static ScrcpyVersion cameraMinimumScrcpy() { return {2, 2, 0}; }
+    static constexpr int kCameraMinimumSdk = 31;
+
+    // Ready-made option sets for the two modes a user picks between.
+    static ScrcpyOptions forScreen(const QString &serial);
+    static ScrcpyOptions forCamera(const QString &serial, CameraFacing facing = CameraFacing::Back);
+
     QString serial;      // --serial; may be empty when exactly one device is connected
+
+    VideoSource videoSource = VideoSource::Display;
 
     // video
     int maxSize = 0;     // --max-size: limit width/height (0 = device resolution)
@@ -56,7 +74,16 @@ struct QTSCRCPY_EXPORT ScrcpyOptions
     bool alwaysOnTop = false;
     bool borderless = false;
 
-    // device behaviour
+    // camera (VideoSource::Camera only; ignored otherwise)
+    CameraFacing cameraFacing = CameraFacing::Any; // first camera facing that way; excludes cameraId
+    QString cameraId;                              // an id as listed by `scrcpy --list-cameras`
+    std::optional<QSize> cameraSize;               // excludes maxSize and cameraAspectRatio
+    QString cameraAspectRatio;                     // "4:3", "1.6" or "sensor"
+    int cameraFps = 0;                             // 0 = Android default (30)
+    bool cameraHighSpeed = false;
+
+    // device behaviour. These need device control, which is off for camera mirroring and
+    // with noControl; scrcpy would refuse to start, so they are not passed on then.
     bool showTouches = false;       // --show-touches
     bool stayAwake = false;         // --stay-awake
     bool turnScreenOff = false;     // --turn-screen-off
@@ -72,6 +99,11 @@ struct QTSCRCPY_EXPORT ScrcpyOptions
 
     // Passed through verbatim for options this wrapper does not model.
     QStringList extraArguments;
+
+    // Empty if these options can be used with `version`, otherwise why not (camera mode
+    // with a scrcpy that lacks it, or combinations scrcpy itself rejects). An invalid
+    // (unknown) version is treated as a current release. Scrcpy::start() calls this.
+    QString validate(const ScrcpyVersion &version = {}) const;
 
     // Builds the argument list for a given scrcpy version. Options whose spelling
     // changed between releases are mapped; options the version lacks are skipped.

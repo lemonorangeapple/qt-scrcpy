@@ -1,4 +1,5 @@
 #include <qtscrcpy/adb.h>
+#include <qtscrcpy/devicemonitor.h>
 #include <qtscrcpy/scrcpyoptions.h>
 
 #include <QtTest>
@@ -24,6 +25,22 @@ private slots:
     void options_modernVersion();
     void options_legacyVersion();
     void options_unknownVersionIsTreatedAsModern();
+    void options_bitRateUsesShortFlag();
+
+    void camera_arguments();
+    void camera_dropsOptionsThatNeedControl();
+    void camera_idAndSizeVariants();
+    void viewOnly_dropsOptionsThatNeedControl();
+    void camera_settingsIgnoredForDisplay();
+    void camera_validation_data();
+    void camera_validation();
+    void factories();
+
+    void monitor_plugInAuthorizeUnplug();
+    void monitor_alreadyAuthorized();
+    void monitor_unrelatedChangesProduceNothing();
+    void monitor_deauthorizedAgain();
+    void monitor_denyThenReplug();
 };
 
 void TstParsing::parseDeviceList_realisticOutput()
@@ -185,7 +202,6 @@ static ScrcpyOptions fullOptions()
     options.powerOffOnClose = true;
     options.disableScreensaver = true;
     options.noClipboardAutosync = true;
-    options.noControl = true;
     options.noDisplay = true;
     options.noAudio = true;
     options.recordFile = "out.mp4";
@@ -196,13 +212,13 @@ static ScrcpyOptions fullOptions()
 void TstParsing::options_modernVersion()
 {
     const QStringList expected{
-        "--serial=SER", "--max-size=1024", "--bit-rate=8000000", "--max-fps=60",
+        "--serial=SER", "--max-size=1024", "-b", "8000000", "--max-fps=60",
         "--crop=1080:1920:0:0", "--window-title=My phone",
         "--window-x=10", "--window-y=20", "--window-width=540", "--window-height=960",
         "--fullscreen", "--always-on-top", "--window-borderless",
         "--show-touches", "--stay-awake", "--turn-screen-off", "--power-off-on-close",
         "--disable-screensaver", "--no-clipboard-autosync",
-        "--no-control", "-N", "--no-audio", "--record=out.mp4",
+        "-N", "--no-audio", "--record=out.mp4",
         "--verbosity=debug"};
     QCOMPARE(fullOptions().toArguments({2, 4, 0}), expected);
 }
@@ -220,6 +236,242 @@ void TstParsing::options_unknownVersionIsTreatedAsModern()
     ScrcpyOptions options;
     options.noAudio = true;
     QCOMPARE(options.toArguments(ScrcpyVersion()), QStringList{"--no-audio"});
+}
+
+void TstParsing::options_bitRateUsesShortFlag()
+{
+    // --bit-rate was removed in scrcpy 3.0 and --video-bit-rate does not exist before 2.0;
+    // -b is accepted by every release.
+    ScrcpyOptions options;
+    options.bitRate = 4000000;
+    const QStringList expected{"-b", "4000000"};
+    QCOMPARE(options.toArguments({1, 25, 0}), expected);
+    QCOMPARE(options.toArguments({2, 4, 0}), expected);
+    QCOMPARE(options.toArguments({3, 3, 3}), expected);
+}
+
+void TstParsing::camera_arguments()
+{
+    ScrcpyOptions options = ScrcpyOptions::forCamera("SER", CameraFacing::Front);
+    options.maxSize = 1920;
+    options.cameraAspectRatio = "16:9";
+    options.cameraFps = 60;
+    options.cameraHighSpeed = true;
+    options.noAudio = true;
+
+    const QStringList expected{
+        "--serial=SER", "--video-source=camera", "--max-size=1920", "--camera-facing=front",
+        "--camera-ar=16:9", "--camera-fps=60", "--camera-high-speed", "--no-audio"};
+    QCOMPARE(options.toArguments({2, 4, 0}), expected);
+    QVERIFY(options.validate({2, 4, 0}).isEmpty());
+}
+
+void TstParsing::camera_dropsOptionsThatNeedControl()
+{
+    // scrcpy exits with "Cannot request ... if control is disabled" for these in camera mode.
+    ScrcpyOptions options = ScrcpyOptions::forCamera("SER");
+    options.showTouches = true;
+    options.stayAwake = true;
+    options.turnScreenOff = true;
+    options.powerOffOnClose = true;
+    QCOMPARE(options.toArguments({3, 3, 3}),
+             (QStringList{"--serial=SER", "--video-source=camera", "--camera-facing=back"}));
+
+    // ...while the same options are kept for screen mirroring.
+    options.videoSource = VideoSource::Display;
+    const QStringList screen = options.toArguments({3, 3, 3});
+    QVERIFY(screen.contains("--show-touches"));
+    QVERIFY(screen.contains("--stay-awake"));
+    QVERIFY(screen.contains("--turn-screen-off"));
+    QVERIFY(screen.contains("--power-off-on-close"));
+}
+
+void TstParsing::camera_idAndSizeVariants()
+{
+    ScrcpyOptions byId = ScrcpyOptions::forCamera({}, CameraFacing::Any);
+    byId.cameraId = "1";
+    QCOMPARE(byId.toArguments({2, 4, 0}), (QStringList{"--video-source=camera", "--camera-id=1"}));
+
+    ScrcpyOptions bySize = ScrcpyOptions::forCamera({}, CameraFacing::External);
+    bySize.cameraSize = QSize(1920, 1080);
+    QCOMPARE(bySize.toArguments({2, 4, 0}),
+             (QStringList{"--video-source=camera", "--camera-facing=external", "--camera-size=1920x1080"}));
+
+    // Any facing: scrcpy picks the first camera on its own.
+    QCOMPARE(ScrcpyOptions::forCamera({}, CameraFacing::Any).toArguments({2, 4, 0}),
+             QStringList{"--video-source=camera"});
+}
+
+void TstParsing::viewOnly_dropsOptionsThatNeedControl()
+{
+    ScrcpyOptions options;
+    options.noControl = true;
+    options.showTouches = true;
+    options.stayAwake = true;
+    options.turnScreenOff = true;
+    options.powerOffOnClose = true;
+    options.windowTitle = "t";
+    QCOMPARE(options.toArguments({2, 4, 0}), (QStringList{"--window-title=t", "--no-control"}));
+    QCOMPARE(options.toArguments({1, 25, 0}), (QStringList{"--window-title=t", "--no-control"}));
+}
+
+void TstParsing::camera_settingsIgnoredForDisplay()
+{
+    // scrcpy rejects camera options unless --video-source=camera is given.
+    ScrcpyOptions options;
+    options.cameraFacing = CameraFacing::Front;
+    options.cameraId = "0";
+    options.cameraSize = QSize(640, 480);
+    options.cameraAspectRatio = "4:3";
+    options.cameraFps = 30;
+    options.cameraHighSpeed = true;
+    QVERIFY(options.toArguments({3, 3, 3}).isEmpty());
+    QVERIFY(options.validate({3, 3, 3}).isEmpty());
+}
+
+void TstParsing::camera_validation_data()
+{
+    QTest::addColumn<int>("scrcpyMajor");
+    QTest::addColumn<int>("scrcpyMinor");
+    QTest::addColumn<QString>("cameraId");
+    QTest::addColumn<int>("facing");
+    QTest::addColumn<bool>("withSize");
+    QTest::addColumn<int>("maxSize");
+    QTest::addColumn<QString>("aspectRatio");
+    QTest::addColumn<QString>("errorFragment"); // empty = valid
+
+    const int any = int(CameraFacing::Any);
+    const int back = int(CameraFacing::Back);
+    QTest::newRow("ok") << 2 << 4 << "" << back << false << 0 << "" << "";
+    QTest::newRow("exactly 2.2") << 2 << 2 << "" << back << false << 0 << "" << "";
+    QTest::newRow("2.1 has no camera") << 2 << 1 << "" << back << false << 0 << "" << "scrcpy 2.2 or newer (found 2.1)";
+    QTest::newRow("1.25 has no camera") << 1 << 25 << "" << back << false << 0 << "" << "scrcpy 2.2 or newer (found 1.25)";
+    QTest::newRow("id + facing") << 2 << 4 << "0" << back << false << 0 << "" << "camera id";
+    QTest::newRow("id alone") << 2 << 4 << "0" << any << false << 0 << "" << "";
+    QTest::newRow("size + max size") << 2 << 4 << "" << back << true << 1280 << "" << "explicit camera size";
+    QTest::newRow("size + aspect ratio") << 2 << 4 << "" << back << true << 0 << "4:3" << "explicit camera size";
+    QTest::newRow("max size + aspect ratio") << 2 << 4 << "" << back << false << 1280 << "4:3" << "";
+}
+
+void TstParsing::camera_validation()
+{
+    QFETCH(int, scrcpyMajor);
+    QFETCH(int, scrcpyMinor);
+    QFETCH(QString, cameraId);
+    QFETCH(int, facing);
+    QFETCH(bool, withSize);
+    QFETCH(int, maxSize);
+    QFETCH(QString, aspectRatio);
+    QFETCH(QString, errorFragment);
+
+    ScrcpyOptions options = ScrcpyOptions::forCamera("SER", static_cast<CameraFacing>(facing));
+    options.cameraId = cameraId;
+    if (withSize)
+        options.cameraSize = QSize(1920, 1080);
+    options.maxSize = maxSize;
+    options.cameraAspectRatio = aspectRatio;
+
+    const QString error = options.validate({scrcpyMajor, scrcpyMinor, 0});
+    if (errorFragment.isEmpty())
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+    else
+        QVERIFY2(error.contains(errorFragment), qPrintable(error));
+}
+
+void TstParsing::factories()
+{
+    const ScrcpyOptions screen = ScrcpyOptions::forScreen("A");
+    QCOMPARE(screen.serial, QStringLiteral("A"));
+    QVERIFY(screen.videoSource == VideoSource::Display);
+    QVERIFY(screen.toArguments({2, 4, 0}) == QStringList{"--serial=A"});
+
+    const ScrcpyOptions camera = ScrcpyOptions::forCamera("B");
+    QVERIFY(camera.videoSource == VideoSource::Camera);
+    QVERIFY(camera.cameraFacing == CameraFacing::Back);
+}
+
+static AdbDevice makeDevice(const QString &serial, const QString &state, const QString &model = {})
+{
+    AdbDevice device;
+    device.serial = serial;
+    device.stateText = state;
+    device.state = AdbDevice::stateFromString(state);
+    device.model = model;
+    return device;
+}
+
+static QList<DeviceEvent::Type> types(const QList<DeviceEvent> &events)
+{
+    QList<DeviceEvent::Type> result;
+    for (const DeviceEvent &event : events)
+        result << event.type;
+    return result;
+}
+
+void TstParsing::monitor_plugInAuthorizeUnplug()
+{
+    using T = DeviceEvent::Type;
+    const AdbDevice unauthorized = makeDevice("PHONE", "unauthorized");
+    const AdbDevice allowed = makeDevice("PHONE", "device", "Pixel_6"); // model is known only after Allow
+
+    // 1. cable plugged in: the phone shows the USB debugging prompt
+    QList<DeviceEvent> events = DeviceMonitor::diff({}, {unauthorized});
+    QCOMPARE(types(events), (QList<T>{T::Attached, T::AuthorizationRequired}));
+
+    // 2. user taps Allow
+    events = DeviceMonitor::diff({unauthorized}, {allowed});
+    QCOMPARE(types(events), (QList<T>{T::StateChanged, T::Ready}));
+    QVERIFY(events[0].previousState == AdbDevice::State::Unauthorized);
+    QCOMPARE(events[1].device.model, QStringLiteral("Pixel_6"));
+
+    // 3. cable pulled
+    events = DeviceMonitor::diff({allowed}, {});
+    QCOMPARE(types(events), (QList<T>{T::Detached}));
+    QCOMPARE(events[0].device.serial, QStringLiteral("PHONE"));
+}
+
+void TstParsing::monitor_alreadyAuthorized()
+{
+    using T = DeviceEvent::Type;
+    // A previously authorized phone needs no prompt.
+    const QList<DeviceEvent> events = DeviceMonitor::diff({}, {makeDevice("PHONE", "device")});
+    QCOMPARE(types(events), (QList<T>{T::Attached, T::Ready}));
+}
+
+void TstParsing::monitor_unrelatedChangesProduceNothing()
+{
+    const AdbDevice a = makeDevice("A", "device", "m1");
+    AdbDevice b = a;
+    b.transportId = "7"; // adb renumbers transports; not worth an event
+    QVERIFY(DeviceMonitor::diff({a}, {b}).isEmpty());
+    QVERIFY(DeviceMonitor::diff({a}, {a}).isEmpty());
+    QVERIFY(DeviceMonitor::diff({}, {}).isEmpty());
+}
+
+void TstParsing::monitor_deauthorizedAgain()
+{
+    using T = DeviceEvent::Type;
+    // Revoking authorizations on the phone while it is connected asks again.
+    const QList<DeviceEvent> events =
+        DeviceMonitor::diff({makeDevice("P", "device")}, {makeDevice("P", "unauthorized")});
+    QCOMPARE(types(events), (QList<T>{T::StateChanged, T::AuthorizationRequired}));
+}
+
+void TstParsing::monitor_denyThenReplug()
+{
+    using T = DeviceEvent::Type;
+    // unauthorized -> offline -> unauthorized again must prompt each time it re-enters "unauthorized".
+    const AdbDevice unauthorized = makeDevice("P", "unauthorized");
+    const AdbDevice offline = makeDevice("P", "offline");
+    QCOMPARE(types(DeviceMonitor::diff({unauthorized}, {offline})), (QList<T>{T::StateChanged}));
+    QCOMPARE(types(DeviceMonitor::diff({offline}, {unauthorized})),
+             (QList<T>{T::StateChanged, T::AuthorizationRequired}));
+
+    // Two devices, one leaves while the other is authorized.
+    const QList<DeviceEvent> events = DeviceMonitor::diff({makeDevice("A", "device"), unauthorized},
+                                                          {makeDevice("A", "device"), makeDevice("P", "device")});
+    QCOMPARE(types(events), (QList<T>{T::StateChanged, T::Ready}));
+    QCOMPARE(events[1].device.serial, QStringLiteral("P"));
 }
 
 QTEST_GUILESS_MAIN(TstParsing)

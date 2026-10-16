@@ -115,6 +115,8 @@ public:
     CommandResult shell(const QString &serial, const QString &command,
                         int timeoutMs = kDefaultTimeoutMs) const;
     QString getProp(const QString &serial, const QString &key) const;
+    // Android API level (e.g. 34 for Android 14); 0 if it cannot be read.
+    int androidSdkVersion(const QString &serial) const;
     QMap<QString, QString> properties(const QString &serial, CommandResult *result = nullptr) const;
 
     CommandResult push(const QString &serial, const QString &localPath, const QString &remotePath,
@@ -143,6 +145,7 @@ public:
     // to `callback` from the event loop (not at all if the Adb object is destroyed first).
 
     void connectDeviceAsync(const QString &address, Callback callback);
+    void androidSdkVersionAsync(const QString &serial, std::function<void(int)> callback);
     void shellAsync(const QString &serial, const QString &command, Callback callback,
                     int timeoutMs = kDefaultTimeoutMs);
     void installAsync(const QString &serial, const QString &apkPath, Callback callback,
