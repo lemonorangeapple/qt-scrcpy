@@ -245,6 +245,36 @@ execute_process(COMMAND ${CMAKE_COMMAND} -S "${HARNESS_DIR}" -B "${r_dir}" RESUL
 file(SIZE "${extract_dir}/runtime/adb" adb_size)
 check_true("an empty adb is not accepted as complete" rc EQUAL 0 AND adb_size GREATER 0)
 
+# ---- 5d2. QTSCRCPY_BUNDLE_ADB=OFF bundles scrcpy without adb ----------------------------------------------
+# (adb's licence terms are the open question of this feature; scrcpy alone is Apache-2.0.)
+set(adb_off_options -DQTSCRCPY_BUNDLE_ADB=OFF -DQTSCRCPY_SCRCPY_VERSION=1.0)
+run_harness(r NAME adb-off BUILD OPTIONS ${adb_off_options} -DQTSCRCPY_SCRCPY_ARCHIVE=${good_archive} -DQTSCRCPY_SCRCPY_SHA256=${good_hash} -DQTSCRCPY_SCRCPY_PLATFORM=custom)
+check_true("adb off: scrcpy, its server and icon are bundled" r_rc EQUAL 0 AND EXISTS "${r_dir}/scrcpy" AND EXISTS "${r_dir}/scrcpy-server" AND EXISTS "${r_dir}/icon.png")
+check_true("adb off: adb is not copied" NOT EXISTS "${r_dir}/adb")
+check_true("adb off: the configure log says so" r_out MATCHES "adb is NOT bundled")
+file(GLOB adb_off_extract "${r_dir}/dl/scrcpy-custom-*")
+check_true("adb off: unpacked in a directory of its own" "${adb_off_extract}" MATCHES "-noadb")
+# Back to ON in the same build directory: a different directory, adb is there again.
+execute_process(COMMAND ${CMAKE_COMMAND} -S "${HARNESS_DIR}" -B "${r_dir}" -DQTSCRCPY_BUNDLE_ADB=ON RESULT_VARIABLE rc OUTPUT_VARIABLE on_out ERROR_QUIET)
+execute_process(COMMAND ${CMAKE_COMMAND} --build "${r_dir}" --clean-first RESULT_VARIABLE rc2 OUTPUT_QUIET ERROR_QUIET)
+check_true("adb back on: adb is bundled again" rc EQUAL 0 AND rc2 EQUAL 0 AND EXISTS "${r_dir}/adb" AND on_out MATCHES "the bundle includes adb")
+
+# The same for a Windows-style package: adb.exe and its two DLLs stay out, scrcpy's own DLLs stay in.
+set(win_top "${WORK_DIR}/tree-win/scrcpy-fake-win-v1.0")
+file(MAKE_DIRECTORY "${win_top}")
+foreach(win_file scrcpy.exe adb.exe AdbWinApi.dll AdbWinUsbApi.dll SDL2.dll avcodec-61.dll scrcpy-server icon.png scrcpy-console.bat)
+    file(WRITE "${win_top}/${win_file}" "content of ${win_file}\n")
+endforeach()
+execute_process(COMMAND ${CMAKE_COMMAND} -E tar cf "${WORK_DIR}/win.zip" --format=zip "scrcpy-fake-win-v1.0" WORKING_DIRECTORY "${WORK_DIR}/tree-win")
+file(SHA256 "${WORK_DIR}/win.zip" win_hash)
+set(win_options -DQTSCRCPY_SCRCPY_ARCHIVE=${WORK_DIR}/win.zip -DQTSCRCPY_SCRCPY_SHA256=${win_hash} -DQTSCRCPY_SCRCPY_VERSION=1.0 -DQTSCRCPY_SCRCPY_PLATFORM=win64)
+run_harness(r NAME win-adb-on BUILD OPTIONS ${win_options})
+check_true("windows package, adb on: adb.exe and its libraries are bundled" r_rc EQUAL 0 AND EXISTS "${r_dir}/adb.exe" AND EXISTS "${r_dir}/AdbWinApi.dll" AND EXISTS "${r_dir}/AdbWinUsbApi.dll")
+check_true("windows package: the helper script is not bundled" NOT EXISTS "${r_dir}/scrcpy-console.bat")
+run_harness(r NAME win-adb-off BUILD OPTIONS ${win_options} -DQTSCRCPY_BUNDLE_ADB=OFF)
+check_true("windows package, adb off: scrcpy.exe and its libraries are bundled" r_rc EQUAL 0 AND EXISTS "${r_dir}/scrcpy.exe" AND EXISTS "${r_dir}/SDL2.dll" AND EXISTS "${r_dir}/avcodec-61.dll" AND EXISTS "${r_dir}/scrcpy-server")
+check_true("windows package, adb off: no adb.exe, no AdbWinApi.dll, no AdbWinUsbApi.dll" NOT EXISTS "${r_dir}/adb.exe" AND NOT EXISTS "${r_dir}/AdbWinApi.dll" AND NOT EXISTS "${r_dir}/AdbWinUsbApi.dll")
+
 # ---- 5e. switching to OFF leaves no outputs of the earlier configure behind ------------------------
 execute_process(COMMAND ${CMAKE_COMMAND} -S "${HARNESS_DIR}" -B "${r_dir}" -DQTSCRCPY_BUNDLE_SCRCPY=OFF RESULT_VARIABLE rc OUTPUT_QUIET ERROR_QUIET)
 file(READ "${r_dir}/CMakeCache.txt" cache_text)

@@ -18,6 +18,11 @@
 #                            otherwise warns and carries on without. OFF does nothing.
 #                            (Default ON here; the qt-scrcpy project itself defaults to AUTO
 #                            when it is the top-level project and to OFF when it is not.)
+#   QTSCRCPY_BUNDLE_ADB      ON (default) / OFF. OFF bundles scrcpy but not adb (nor, on Windows,
+#                            AdbWinApi.dll / AdbWinUsbApi.dll): adb then has to be installed on the
+#                            machine. adb comes from Google's Android SDK Platform-Tools, whose
+#                            licence terms for redistribution are not established (see
+#                            THIRD_PARTY_NOTICES.md); scrcpy itself is Apache-2.0.
 #   QTSCRCPY_SCRCPY_VERSION  scrcpy release to bundle; empty = the pinned one. Any other
 #                            version needs QTSCRCPY_SCRCPY_SHA256.
 #   QTSCRCPY_SCRCPY_SHA256   SHA-256 of the package.
@@ -46,8 +51,8 @@
 #
 # Needs CMake 3.16 or newer. State is kept in global properties and internal cache entries, not in the scope that
 # included this file, so the functions work when called from any directory.
-# The unpacked files and their scrcpy version are available in QTSCRCPY_BUNDLE_ROOT and
-# QTSCRCPY_BUNDLE_VERSION (internal cache entries).
+# The unpacked files, their scrcpy version and whether adb is among them are available in
+# QTSCRCPY_BUNDLE_ROOT, QTSCRCPY_BUNDLE_VERSION and QTSCRCPY_BUNDLE_HAS_ADB (internal cache entries).
 
 include_guard(GLOBAL)
 include(CMakeParseArguments)
@@ -72,6 +77,7 @@ if(NOT DEFINED CACHE{QTSCRCPY_BUNDLE_SCRCPY})
     endif()
 endif()
 set_property(CACHE QTSCRCPY_BUNDLE_SCRCPY PROPERTY STRINGS AUTO ON OFF)
+option(QTSCRCPY_BUNDLE_ADB "Bundle adb (Android SDK Platform-Tools) too; OFF bundles scrcpy only and leaves adb to the machine" ON)
 set(QTSCRCPY_SCRCPY_VERSION "" CACHE STRING
     "scrcpy release to bundle (empty: the pinned one; any other version needs QTSCRCPY_SCRCPY_SHA256)")
 set(QTSCRCPY_SCRCPY_SHA256 "" CACHE STRING "SHA-256 of the scrcpy package (required for a version without a pinned checksum)")
@@ -274,7 +280,7 @@ endfunction()
 # keeping only the files an application needs in <extract_dir>/runtime. Works in a
 # staging directory and renames it into place, so an interrupted run never leaves
 # something that looks complete.
-function(_qtscrcpy_unpack archive expected platform extract_dir)
+function(_qtscrcpy_unpack archive expected platform extract_dir with_adb)
     set(staging "${extract_dir}.partial")
     file(REMOVE_RECURSE "${staging}")
     file(MAKE_DIRECTORY "${staging}")
@@ -320,7 +326,10 @@ function(_qtscrcpy_unpack archive expected platform extract_dir)
 
     _qtscrcpy_exe_suffix("${platform}" suffix)
     # If scrcpy ever changes its package layout, fail now and not at run time.
-    set(wanted "scrcpy${suffix}" "adb${suffix}" "scrcpy-server")
+    set(wanted "scrcpy${suffix}" "scrcpy-server")
+    if(with_adb)
+        list(APPEND wanted "adb${suffix}")
+    endif()
     foreach(required IN LISTS wanted)
         if(NOT EXISTS "${package_root}/${required}" OR IS_DIRECTORY "${package_root}/${required}")
             file(REMOVE_RECURSE "${staging}")
@@ -333,6 +342,9 @@ function(_qtscrcpy_unpack archive expected platform extract_dir)
     if(suffix STREQUAL ".exe")
         _qtscrcpy_glob_escape("${package_root}" package_root_glob)
         file(GLOB dlls RELATIVE "${package_root}" "${package_root_glob}/*.dll")
+        if(NOT with_adb)
+            list(FILTER dlls EXCLUDE REGEX "^AdbWin(Usb)?Api\\.dll$") # adb.exe's own libraries
+        endif()
         list(APPEND wanted ${dlls})
     endif()
 
@@ -401,6 +413,7 @@ function(_qtscrcpy_resolve)
     # Outputs of an earlier configure must not outlive a switch to OFF or a skipped AUTO.
     unset(QTSCRCPY_BUNDLE_ROOT CACHE)
     unset(QTSCRCPY_BUNDLE_VERSION CACHE)
+    unset(QTSCRCPY_BUNDLE_HAS_ADB CACHE)
     _qtscrcpy_bundle_mode(mode)
     if(mode STREQUAL "OFF")
         message(STATUS "qt-scrcpy: not bundling scrcpy and adb (QTSCRCPY_BUNDLE_SCRCPY=OFF)")
@@ -485,6 +498,12 @@ function(_qtscrcpy_resolve)
 
     string(SUBSTRING "${expected}" 0 12 short_hash)
     set(extract_dir "${QTSCRCPY_DOWNLOAD_DIR}/scrcpy-${platform}-v${version}-${short_hash}")
+    if(QTSCRCPY_BUNDLE_ADB)
+        set(with_adb TRUE)
+    else()
+        set(with_adb FALSE)
+        string(APPEND extract_dir "-noadb") # a different set of files: its own directory
+    endif()
 
     # A package the user brought is checked every time (read-only).
     if(QTSCRCPY_SCRCPY_ARCHIVE)
@@ -567,14 +586,21 @@ function(_qtscrcpy_resolve)
                 file(RENAME "${part}" "${archive}")
             endif()
         endif()
-        _qtscrcpy_unpack("${archive}" "${expected}" "${platform}" "${extract_dir}")
+        _qtscrcpy_unpack("${archive}" "${expected}" "${platform}" "${extract_dir}" ${with_adb})
     endif()
     set(root "${extract_dir}/runtime")
 
     message(STATUS "qt-scrcpy: bundling scrcpy ${version} (${platform}) from ${root}")
+    if(with_adb)
+        message(STATUS "qt-scrcpy: the bundle includes adb (Google Android SDK Platform-Tools); read THIRD_PARTY_NOTICES.md "
+                       "before distributing, or use -DQTSCRCPY_BUNDLE_ADB=OFF to leave adb out")
+    else()
+        message(STATUS "qt-scrcpy: adb is NOT bundled (QTSCRCPY_BUNDLE_ADB=OFF): it must be installed on the machine")
+    endif()
     set_property(GLOBAL PROPERTY QTSCRCPY_BUNDLE_MARKER "${extract_dir}/.qtscrcpy-extracted")
     set(QTSCRCPY_BUNDLE_ROOT "${root}" CACHE INTERNAL "Directory with the unpacked scrcpy runtime files")
     set(QTSCRCPY_BUNDLE_VERSION "${version}" CACHE INTERNAL "scrcpy version of the bundled package")
+    set(QTSCRCPY_BUNDLE_HAS_ADB "${with_adb}" CACHE INTERNAL "Whether the bundle contains adb")
     if(NOT version STREQUAL pinned_version OR QTSCRCPY_SCRCPY_SHA256)
         message(WARNING
             "qt-scrcpy: THIRD_PARTY_NOTICES.md describes the scrcpy ${pinned_version} release packages. "
@@ -609,10 +635,15 @@ function(qtscrcpy_bundle_runtime target)
     endif()
 
     get_property(module_dir GLOBAL PROPERTY QTSCRCPY_MODULE_DIR)
+    if(QTSCRCPY_BUNDLE_HAS_ADB)
+        set(bundled_what "scrcpy and adb")
+    else()
+        set(bundled_what "scrcpy")
+    endif()
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} "-DSRC=${QTSCRCPY_BUNDLE_ROOT}" "-DDST=$<TARGET_FILE_DIR:${target}>"
                 -P "${module_dir}/copy_runtime.cmake"
-        COMMENT "Bundling scrcpy and adb next to ${target}"
+        COMMENT "Bundling ${bundled_what} next to ${target}"
         VERBATIM)
     # If the unpacked cache disappears, the next build runs CMake again and unpacks it again,
     # instead of failing in the copy step.

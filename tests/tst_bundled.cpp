@@ -67,7 +67,13 @@ void TstBundled::cleanupTestCase()
 
 void TstBundled::packageIsNextToTheExecutable()
 {
-    for (const QString &name : {exe("scrcpy"), exe("adb")}) {
+    QStringList programs{exe("scrcpy")};
+#if BUNDLED_ADB
+    programs << exe("adb");
+#else
+    QVERIFY2(!QFileInfo::exists(inAppDir(exe("adb"))), "adb must not be bundled with QTSCRCPY_BUNDLE_ADB=OFF");
+#endif
+    for (const QString &name : programs) {
         QVERIFY2(QFileInfo::exists(inAppDir(name)), qPrintable(name + " missing in " + QCoreApplication::applicationDirPath()));
         QVERIFY2(QFileInfo(inAppDir(name)).isExecutable(), qPrintable(name + " is not executable"));
     }
@@ -77,6 +83,9 @@ void TstBundled::packageIsNextToTheExecutable()
 
 void TstBundled::adbIsFoundAndRuns()
 {
+#if !BUNDLED_ADB
+    QSKIP("adb is not bundled (QTSCRCPY_BUNDLE_ADB=OFF)");
+#endif
     // The copy next to the program is found although another adb comes first on $PATH.
     QCOMPARE(canonical(Adb::findExecutable()), canonical(inAppDir(exe("adb"))));
     if (m_decoysWork)
@@ -107,7 +116,12 @@ void TstBundled::scrcpyHandsTheBundledAdbToScrcpy()
 {
     // The package's scrcpy would otherwise look adb up in $PATH, where the bundled one is not.
     Scrcpy scrcpy;
-#ifdef Q_OS_WIN
+#if !BUNDLED_ADB
+    // No adb beside scrcpy: it is handed the one the library itself would use (here the decoy on $PATH).
+    QCOMPARE(scrcpy.effectiveAdbExecutable(), Adb::findExecutable());
+    if (m_decoysWork)
+        QVERIFY(!scrcpy.effectiveAdbExecutable().isEmpty());
+#elif defined(Q_OS_WIN)
     // scrcpy.exe finds the adb.exe in its own directory by itself (and cannot take a path with
     // spaces in $ADB), so nothing is exported.
     QCOMPARE(scrcpy.effectiveAdbExecutable(), QString());

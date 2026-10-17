@@ -53,6 +53,7 @@ cmake --install build --prefix /opt/qt-scrcpy
 | 选项 | 作用 |
 | ---- | ---- |
 | `-DQTSCRCPY_BUNDLE_SCRCPY=AUTO\|ON\|OFF` | `ON`:一定要带上,做不到就报错。`AUTO`(qt-scrcpy 作为顶层项目时的默认值):scrcpy 发布了对应平台的包就带上,没有(如 Linux aarch64)就给出警告并继续、不带。`OFF`:不下载,使用系统里安装的。作为子项目时默认 `OFF` |
+| `-DQTSCRCPY_BUNDLE_ADB=ON\|OFF` | 默认 `ON`。`OFF`:只带上 scrcpy 和 scrcpy-server,**不带 adb**(Windows 上也不带 `AdbWinApi.dll`、`AdbWinUsbApi.dll`),使用者的机器上要自己装 adb(见"查找可执行文件",库会通过 `ADB` 环境变量把找到的 adb 交给 scrcpy)。想分发而不想分发 adb 时用这个。切换后会使用单独的解压缓存(目录名带 `-noadb`),不需要清缓存 |
 | `-DQTSCRCPY_SCRCPY_MIRROR=<url>` | 从镜像下载(GitHub 访问慢时用),`http`、`https` 或 `file` 地址;镜像上的文件名要和官方一致:`scrcpy-<平台>-v<版本>.tar.gz`(Windows 为 `.zip`)。校验值仍然生效,镜像无法换成别的内容(除非你同时改了下面的 SHA256) |
 | `-DQTSCRCPY_SCRCPY_ARCHIVE=<file>` | 用已经下载好的包(离线构建),同样要通过校验。请给绝对路径:这是 `FILEPATH` 类型的缓存变量,CMake 会把命令行里的相对路径当作相对于执行 `cmake` 时的当前目录 |
 | `-DQTSCRCPY_DOWNLOAD_DIR=<dir>` | 下载与解压缓存目录 |
@@ -82,7 +83,7 @@ install(TARGETS myapp RUNTIME DESTINATION libexec/myapp)           # 程序和 s
 - **Linux 运行要求:** scrcpy 已经把 SDL、FFmpeg、libusb 静态链接进去,但需要系统有 **glibc ≥ 2.35**(实测符号版本)和 `libudev.so.1`,显示窗口还需要 X11/Wayland 等图形库;随包的 adb 另需 `libgcc_s.so.1`。比 Ubuntu 22.04 更老的系统(glibc 2.31 等)上构建没问题,但包里的 scrcpy 起不来,而且程序旁边的 scrcpy 会优先于 `PATH` 里能用的那个,`tst_bundled` 和 `compat_bundled` 也会失败:这样的系统请用 `-DQTSCRCPY_BUNDLE_SCRCPY=OFF`(或设置 `SCRCPY_EXECUTABLE`)。
 - Windows 包会把 `adb.exe`、`scrcpy.exe` 和所需 DLL 一起复制过来;Qt 自己的运行库不在其中,请照常用 `windeployqt` / `macdeployqt` 等处理。
 - 库在 `QCoreApplication` 创建之前找不到程序所在目录里的文件(它要靠 `applicationDirPath()`),所以不要在静态/全局对象里构造 `Adb` / `Scrcpy`。
-- **分发前请先看 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。** 仓库本身不含任何二进制,是每个构建者自己下载;但把构建出来的程序分发给别人,就等于分发了它们:scrcpy 是 Apache-2.0,FFmpeg、libusb 是 LGPL,而 **adb 来自 Android SDK Platform-Tools:它的下载页展示的是 Google 的 Android SDK 许可协议(其中有对再分发的限制),但 adb 本身适用哪个许可证、是否允许这样捆绑分发,没有查证清楚**。不想分发 adb 就用 `-DQTSCRCPY_BUNDLE_SCRCPY=OFF`。`cmake --install` 会把声明文件和部分许可证文本一起装到 `share/doc/`;直接拷贝构建目录得到的只有二进制,不带任何声明。
+- **分发前请先看 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。** 仓库本身不含任何二进制,是每个构建者自己下载;但把构建出来的程序分发给别人,就等于分发了它们:scrcpy 是 Apache-2.0,FFmpeg、libusb 是 LGPL,而 **adb 来自 Android SDK Platform-Tools:它的下载页展示的是 Google 的 Android SDK 许可协议(其中有对再分发的限制),但 adb 本身适用哪个许可证、是否允许这样捆绑分发,没有查证清楚**。不想分发 adb 就用 `-DQTSCRCPY_BUNDLE_ADB=OFF`(只带 scrcpy,使用者自己装 adb;整个不带则用 `-DQTSCRCPY_BUNDLE_SCRCPY=OFF`)。配置时会打印一行提示说明包里是否含 adb。是否可以分发 adb 由你自己判断,这里没有替你做结论。`cmake --install` 会把声明文件和部分许可证文本一起装到 `share/doc/`;直接拷贝构建目录得到的只有二进制,不带任何声明。
 
 ## 查找可执行文件
 

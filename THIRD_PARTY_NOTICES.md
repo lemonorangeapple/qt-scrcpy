@@ -4,7 +4,7 @@
 
 启用 `QTSCRCPY_BUNDLE_SCRCPY`(顶层构建默认 `AUTO`)后,CMake 会在**构建这台机器上**从 scrcpy 官方发布页下载发布包,用固定的 SHA-256 校验,再复制到程序旁边(见 `cmake/QtScrcpyBundle.cmake`)。这样构建出来的程序、以及 `cmake --install` 的安装目录里**含有**下面这些第三方组件。把它们分发给别人时,下面的许可证条款就适用于分发者。
 
-> 本文件整理的是调查时读到的事实,**不是法律意见**。标了「未确认」的地方是没能查证的,不要当成结论。不想分发 adb 的话,用 `-DQTSCRCPY_BUNDLE_SCRCPY=OFF` 构建,让使用者自己安装 platform-tools 和 scrcpy。
+> 本文件整理的是调查时读到的事实,**不是法律意见**。标了「未确认」的地方是没能查证的,不要当成结论。不想分发 adb 的话,用 `-DQTSCRCPY_BUNDLE_ADB=OFF` 构建(只带 scrcpy,使用者自己安装 platform-tools),或用 `-DQTSCRCPY_BUNDLE_SCRCPY=OFF`(都不带)。用 `QTSCRCPY_BUNDLE_ADB=OFF` 构建时,下面「adb」一节以及 Windows 上的 `AdbWinApi.dll`、`AdbWinUsbApi.dll` 不适用,其余部分仍然适用。
 
 **这份声明随 `cmake --install` 一起安装(`share/doc/…/`),但只有安装才会带上它。** 直接拷贝构建目录、或用 `NO_INSTALL` 的目标,拿到的只有二进制,没有任何声明或许可证文本;分发前需要自己补上。
 
