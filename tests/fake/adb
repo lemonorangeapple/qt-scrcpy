@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Minimal stand-in for `adb`, driven by environment variables (see tests):
+#   FAKE_ADB_LOG      file that receives one tab-separated line per invocation
+#   FAKE_ADB_DEVICES  file whose content is the device list printed by `devices`
+#   FAKE_ADB_FAIL     if set, every command fails with exit status 1
+#   FAKE_ADB_SDK      Android API level reported by getprop (default 34)
+if [ -n "$FAKE_ADB_LOG" ]; then
+    { printf '%s\t' "$@"; echo; } >> "$FAKE_ADB_LOG"
+fi
+if [ -n "$FAKE_ADB_FAIL" ]; then
+    echo "error: no devices/emulators found" >&2
+    exit 1
+fi
+
+if [ "$1" = "-s" ]; then shift 2; fi
+cmd="$1"; shift
+
+case "$cmd" in
+version)
+    echo "Android Debug Bridge version 1.0.41"
+    echo "Version 34.0.4-fake"
+    echo "Installed as /fake/adb"
+    ;;
+devices)
+    echo "List of devices attached"
+    [ -f "$FAKE_ADB_DEVICES" ] && cat "$FAKE_ADB_DEVICES"
+    echo
+    ;;
+track-devices)
+    prev=""
+    while true; do
+        cur=$(cat "$FAKE_ADB_DEVICES" 2>/dev/null)
+        if [ "$cur" != "$prev" ]; then
+            echo "$cur"
+            echo
+            prev="$cur"
+        fi
+        sleep 0.05
+    done
+    ;;
+connect)
+    case "$1" in
+    *bad*) echo "failed to connect to '$1': Connection refused" ;;
+    *) echo "connected to $1" ;;
+    esac
+    ;;
+pair)
+    if [ "$2" = "123456" ]; then echo "Successfully paired to $1 [guid=adb-fake]"
+    else echo "Failed: Wrong password or connection dropped"; fi
+    ;;
+disconnect) echo "disconnected $1" ;;
+shell)
+    case "$*" in
+    "ip -f inet addr show wlan0")
+        printf '22: wlan0: <BROADCAST,MULTICAST,UP>\n    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0\n' ;;
+    "getprop ro.product.model") echo "Fake Phone" ;;
+    "getprop ro.build.version.sdk") echo "${FAKE_ADB_SDK:-34}" ;;
+    "getprop")
+        printf '[ro.product.model]: [Fake Phone]\r\n[ro.build.version.release]: [14]\r\n' ;;
+    "pm list packages"*)
+        printf 'package:com.b.app\r\npackage:com.a.app\r\n' ;;
+    *) echo "shell:$*" ;;
+    esac
+    ;;
+exec-out) printf '\x89PNG\r\n\x1a\nFAKEDATA' ;;
+install)
+    case "$*" in
+    *bad.apk*) echo "Failure [INSTALL_FAILED_INVALID_APK]" ;;
+    *) echo "Performing Streamed Install"; echo "Success" ;;
+    esac
+    ;;
+hang) exec sleep 10 ;; # exec: killing this script kills the sleep too
+*) echo "fake-adb:$cmd $*" ;;
+esac

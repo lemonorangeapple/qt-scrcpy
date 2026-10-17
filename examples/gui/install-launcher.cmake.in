@@ -1,0 +1,16 @@
+# Generated from install-launcher.cmake.in and run by `cmake --install`:
+# <bindir>/qtscrcpy-gui -> the executable in its private directory (a relative link, so a moved
+# prefix keeps working). Directories may be relative to the install prefix or absolute
+# (GNUInstallDirs allows both), and the prefix is only known now.
+set(bin_dir "@CMAKE_INSTALL_BINDIR@")
+set(app_dir "@_gui_dir@")
+if(NOT IS_ABSOLUTE "${bin_dir}")
+    set(bin_dir "${CMAKE_INSTALL_PREFIX}/${bin_dir}")
+endif()
+if(NOT IS_ABSOLUTE "${app_dir}")
+    set(app_dir "${CMAKE_INSTALL_PREFIX}/${app_dir}")
+endif()
+file(RELATIVE_PATH target "${bin_dir}" "${app_dir}/qtscrcpy-gui")
+file(MAKE_DIRECTORY "$ENV{DESTDIR}${bin_dir}")
+file(CREATE_LINK "${target}" "$ENV{DESTDIR}${bin_dir}/qtscrcpy-gui" SYMBOLIC)
+message(STATUS "Linking: $ENV{DESTDIR}${bin_dir}/qtscrcpy-gui -> ${target}")
