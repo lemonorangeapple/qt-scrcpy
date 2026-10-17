@@ -32,9 +32,16 @@ public:
     void setExecutable(const QString &executable);
     bool isAvailable() const;
 
-    // adb binary scrcpy should use (exported to it as $ADB). Empty keeps scrcpy's own lookup.
+    // adb binary scrcpy should use, exported to it as $ADB. In order of precedence: the one
+    // set here; the environment's own $ADB if it resolves to a program (left alone); an adb
+    // in the directory of the real scrcpy file (scrcpy release packages ship both together;
+    // on Windows scrcpy finds it by itself, so nothing is exported); the adb that
+    // Adb::findExecutable() finds (application directory, $ADB, SDK directories, $PATH),
+    // because a scrcpy from a release package never looks in $PATH on Linux and macOS.
     QString adbExecutable() const { return m_adbExecutable; }
     void setAdbExecutable(const QString &adb) { m_adbExecutable = adb; }
+    // The adb that start() will hand to scrcpy; empty if scrcpy is left to find one itself.
+    QString effectiveAdbExecutable() const;
 
     // Version reported by `scrcpy --version` (cached; invalid if scrcpy cannot be run).
     ScrcpyVersion version() const;

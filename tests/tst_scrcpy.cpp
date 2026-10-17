@@ -1,5 +1,7 @@
+#include <qtscrcpy/adb.h>
 #include <qtscrcpy/scrcpy.h>
 
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -21,6 +23,11 @@ private slots:
     void cameraMirroringPassesCameraArguments();
     void cameraMirroringRefusedOnOldScrcpy();
     void conflictingOptionsRefused();
+    void usesAdbShippedNextToScrcpy();
+    void fallsBackToTheAdbThatAdbWouldUse();
+    void sameDirectoryAdbIsFoundThroughASymbolicLink();
+    void anUnresolvableEnvironmentAdbIsIgnoredLikeAdbDoes();
+    void explicitAdbAndEnvironmentBeatSiblingAdb();
     void streamsOutputLines();
     void stopTerminatesGracefully();
     void stopKillsAfterGracePeriod();
@@ -179,6 +186,138 @@ void TstScrcpy::conflictingOptionsRefused()
     QVERIFY(!scrcpy.start(options));
     QCOMPARE(errors.count(), 1);
     QVERIFY(logLines().isEmpty());
+}
+
+// A directory laid out like a scrcpy release package: scrcpy and adb side by side.
+static QString makePackageDir(const QTemporaryDir &dir)
+{
+    QFile::copy(fakeScrcpy(), dir.filePath("scrcpy"));
+    QFile::copy(QStringLiteral(FAKE_DIR "/adb"), dir.filePath("adb"));
+    return dir.path();
+}
+
+void TstScrcpy::usesAdbShippedNextToScrcpy()
+{
+    QTemporaryDir pkg;
+    makePackageDir(pkg);
+    qunsetenv("ADB");
+
+    Scrcpy scrcpy;
+    scrcpy.setExecutable(pkg.filePath("scrcpy"));
+    QCOMPARE(scrcpy.effectiveAdbExecutable(), pkg.filePath("adb"));
+    QVERIFY(startAndWaitUntilReady(scrcpy));
+    QVERIFY2(logLines().contains("ADB=" + pkg.filePath("adb")), qPrintable(logLines().join('|')));
+    scrcpy.stop();
+    QTRY_COMPARE(scrcpy.state(), Scrcpy::State::Stopped);
+}
+
+// Keeps the lookups of Adb::findExecutable() away from whatever this machine has installed.
+class IsolatedAdbEnvironment
+{
+public:
+    IsolatedAdbEnvironment(const QString &path, const QString &home)
+        : m_path(qgetenv("PATH")), m_home(qgetenv("HOME")), m_adb(qgetenv("ADB")),
+          m_sdkRoot(qgetenv("ANDROID_SDK_ROOT")), m_androidHome(qgetenv("ANDROID_HOME")),
+          m_localAppData(qgetenv("LOCALAPPDATA"))
+    {
+        qputenv("PATH", path.toUtf8());
+        qputenv("HOME", home.toUtf8()); // ~/Android/Sdk/platform-tools is searched before $PATH
+        qunsetenv("ADB");
+        qunsetenv("ANDROID_SDK_ROOT");
+        qunsetenv("ANDROID_HOME");
+        qunsetenv("LOCALAPPDATA");
+    }
+    ~IsolatedAdbEnvironment()
+    {
+        restore("PATH", m_path);
+        restore("HOME", m_home);
+        restore("ADB", m_adb);
+        restore("ANDROID_SDK_ROOT", m_sdkRoot);
+        restore("ANDROID_HOME", m_androidHome);
+        restore("LOCALAPPDATA", m_localAppData);
+    }
+
+private:
+    static void restore(const char *name, const QByteArray &value)
+    {
+        if (value.isNull())
+            qunsetenv(name);
+        else
+            qputenv(name, value);
+    }
+    QByteArray m_path, m_home, m_adb, m_sdkRoot, m_androidHome, m_localAppData;
+};
+
+void TstScrcpy::fallsBackToTheAdbThatAdbWouldUse()
+{
+    // A scrcpy from a release package never searches $PATH for adb on Linux/macOS, so with no
+    // adb beside it the wrapper passes on the one it would use itself.
+    QTemporaryDir lonely; // only scrcpy
+    QFile::copy(fakeScrcpy(), lonely.filePath("scrcpy"));
+    QTemporaryDir pathDir; // a directory on $PATH that has an adb
+    QFile::copy(QStringLiteral(FAKE_DIR "/adb"), pathDir.filePath("adb"));
+    QTemporaryDir emptyDir;
+
+    IsolatedAdbEnvironment isolated(pathDir.path(), emptyDir.path());
+    Scrcpy scrcpy;
+    scrcpy.setExecutable(lonely.filePath("scrcpy"));
+    QCOMPARE(scrcpy.effectiveAdbExecutable(), pathDir.filePath("adb"));
+
+    // Nothing anywhere: left to scrcpy (and its own error message).
+    qputenv("PATH", emptyDir.path().toUtf8());
+    QVERIFY2(scrcpy.effectiveAdbExecutable().isEmpty(), qPrintable(scrcpy.effectiveAdbExecutable()));
+}
+
+void TstScrcpy::sameDirectoryAdbIsFoundThroughASymbolicLink()
+{
+    // The usual way to install the portable package: extract it, link scrcpy into a bin directory.
+    // scrcpy resolves the link, so its adb is the one beside the real file.
+    QTemporaryDir pkg;
+    makePackageDir(pkg);
+    QTemporaryDir bin;
+    QVERIFY(QFile::link(pkg.filePath("scrcpy"), bin.filePath("scrcpy")));
+    QTemporaryDir emptyDir;
+
+    IsolatedAdbEnvironment isolated(emptyDir.path(), emptyDir.path());
+    Scrcpy scrcpy;
+    scrcpy.setExecutable(bin.filePath("scrcpy"));
+    QCOMPARE(QFileInfo(scrcpy.effectiveAdbExecutable()).canonicalFilePath(), QFileInfo(pkg.filePath("adb")).canonicalFilePath());
+}
+
+void TstScrcpy::anUnresolvableEnvironmentAdbIsIgnoredLikeAdbDoes()
+{
+    QTemporaryDir pkg;
+    makePackageDir(pkg);
+    QTemporaryDir emptyDir;
+
+    IsolatedAdbEnvironment isolated(emptyDir.path(), emptyDir.path());
+    qputenv("ADB", "/nonexistent/adb");
+    Scrcpy scrcpy;
+    scrcpy.setExecutable(pkg.filePath("scrcpy"));
+    // Scrcpy and Adb must not disagree about which adb is in use.
+    QCOMPARE(scrcpy.effectiveAdbExecutable(), pkg.filePath("adb"));
+    QVERIFY(Adb::findExecutable() != QStringLiteral("/nonexistent/adb"));
+}
+
+void TstScrcpy::explicitAdbAndEnvironmentBeatSiblingAdb()
+{
+    QTemporaryDir pkg;
+    makePackageDir(pkg);
+    QTemporaryDir emptyDir;
+    IsolatedAdbEnvironment isolated(emptyDir.path(), emptyDir.path());
+
+    Scrcpy scrcpy;
+    scrcpy.setExecutable(pkg.filePath("scrcpy"));
+
+    // 1. A working $ADB is the user's choice and wins over the sibling.
+    qputenv("ADB", QStringLiteral(FAKE_DIR "/adb").toUtf8());
+    QCOMPARE(scrcpy.effectiveAdbExecutable(), QString()); // not overridden, scrcpy reads $ADB itself
+
+    // 2. An explicit setAdbExecutable() wins over everything.
+    scrcpy.setAdbExecutable("/explicit/adb");
+    QCOMPARE(scrcpy.effectiveAdbExecutable(), QStringLiteral("/explicit/adb"));
+    qunsetenv("ADB");
+    QCOMPARE(scrcpy.effectiveAdbExecutable(), QStringLiteral("/explicit/adb"));
 }
 
 void TstScrcpy::streamsOutputLines()

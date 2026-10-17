@@ -1,5 +1,6 @@
 #include <qtscrcpy/adb.h>
 #include <qtscrcpy/devicemonitor.h>
+#include <qtscrcpy/locate.h>
 #include <qtscrcpy/scrcpyoptions.h>
 
 #include <QtTest>
@@ -15,6 +16,7 @@ private slots:
     void deviceKinds_data();
     void deviceKinds();
     void shellQuote();
+    void windowsCommandLineQuoting();
     void deviceArgs();
 
     void version_parse_data();
@@ -129,6 +131,15 @@ void TstParsing::shellQuote()
     QCOMPARE(Adb::shellQuote(QStringLiteral("it's")), QStringLiteral("'it'\\''s'"));
     QCOMPARE(Adb::shellQuote(QStringLiteral("a b; rm -rf /")), QStringLiteral("'a b; rm -rf /'"));
     QCOMPARE(Adb::shellQuote({}), QStringLiteral("''"));
+}
+
+void TstParsing::windowsCommandLineQuoting()
+{
+    // $ADB reaches scrcpy's Windows command line unquoted; a space would split the program path.
+    QCOMPARE(quotedForWindowsCommandLine("C:/Program Files/app/adb.exe"), QStringLiteral("\"C:/Program Files/app/adb.exe\""));
+    QCOMPARE(quotedForWindowsCommandLine("C:/tools/adb.exe"), QStringLiteral("C:/tools/adb.exe"));
+    QCOMPARE(quotedForWindowsCommandLine("\"C:/Program Files/adb.exe\""), QStringLiteral("\"C:/Program Files/adb.exe\""));
+    QCOMPARE(quotedForWindowsCommandLine({}), QString());
 }
 
 void TstParsing::deviceArgs()

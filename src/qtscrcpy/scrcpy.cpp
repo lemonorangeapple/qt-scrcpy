@@ -1,8 +1,10 @@
 #include "scrcpy.h"
 
+#include "adb.h"
 #include "commandrunner.h"
 #include "locate.h"
 
+#include <QFileInfo>
 #include <QProcessEnvironment>
 #include <QStandardPaths>
 
@@ -74,6 +76,39 @@ ScrcpyVersion Scrcpy::version() const
     return m_version;
 }
 
+QString Scrcpy::effectiveAdbExecutable() const
+{
+    if (!m_adbExecutable.isEmpty())
+        return m_adbExecutable;
+
+    // The user's own choice, if it works (a $ADB that does not resolve is ignored here and
+    // by Adb::findExecutable() alike, instead of the two disagreeing).
+    const QString environmentAdb = qEnvironmentVariable("ADB");
+    if (!environmentAdb.isEmpty() && !QStandardPaths::findExecutable(environmentAdb).isEmpty())
+        return {}; // scrcpy reads $ADB itself
+
+    // Packages from the scrcpy project contain adb next to scrcpy and their scrcpy looks
+    // there, in the directory of the real file (symbolic links are resolved).
+    const QString scrcpyPath = QStandardPaths::findExecutable(m_executable);
+    if (!scrcpyPath.isEmpty()) {
+        const QString realPath = QFileInfo(scrcpyPath).canonicalFilePath();
+        const QString sibling = QStandardPaths::findExecutable(QStringLiteral("adb"),
+                                                               {QFileInfo(realPath).absolutePath()});
+        if (!sibling.isEmpty()) {
+#ifdef Q_OS_WIN
+            // scrcpy.exe finds the adb.exe in its own directory by itself, while a path given
+            // in $ADB reaches the command line unquoted (a problem under "Program Files").
+            return {};
+#else
+            return sibling;
+#endif
+        }
+    }
+
+    // Such a scrcpy never falls back to $PATH on Unix, so hand it the adb that Adb would use.
+    return Adb::findExecutable();
+}
+
 qint64 Scrcpy::processId() const
 {
     return m_process.state() == QProcess::NotRunning ? 0 : m_process.processId();
@@ -99,8 +134,12 @@ bool Scrcpy::start(const ScrcpyOptions &options)
     m_arguments = options.toArguments(scrcpyVersion);
 
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-    if (!m_adbExecutable.isEmpty())
-        environment.insert(QStringLiteral("ADB"), m_adbExecutable);
+    QString adb = effectiveAdbExecutable();
+#ifdef Q_OS_WIN
+    adb = quotedForWindowsCommandLine(adb);
+#endif
+    if (!adb.isEmpty())
+        environment.insert(QStringLiteral("ADB"), adb);
     m_process.setProcessEnvironment(environment);
 
     m_stdoutBuffer.clear();

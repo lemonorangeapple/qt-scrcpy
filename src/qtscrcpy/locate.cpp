@@ -29,3 +29,14 @@ QString locateExecutable(const QString &name, const QString &envVar, const QStri
 }
 
 } // namespace QtScrcpy
+
+namespace QtScrcpy {
+
+QString quotedForWindowsCommandLine(const QString &path)
+{
+    if (!path.contains(QLatin1Char(' ')) || (path.startsWith(QLatin1Char('"')) && path.endsWith(QLatin1Char('"'))))
+        return path;
+    return QLatin1Char('"') + path + QLatin1Char('"');
+}
+
+} // namespace QtScrcpy

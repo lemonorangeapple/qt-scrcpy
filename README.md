@@ -18,12 +18,12 @@
 
 ## 构建
 
-需要 `adb` 和 `scrcpy` 在 `PATH` 里(或见下面的环境变量)。
+默认**不需要**预先安装 scrcpy 和 adb:构建时会自动下载并带上它们(见下一节)。第一次配置需要能访问 GitHub(或自己提供镜像/离线包);用 `-DQTSCRCPY_BUNDLE_SCRCPY=OFF` 可以关闭,这时需要 `adb` 和 `scrcpy` 在 `PATH` 里(或见"查找可执行文件")。
 
 ```sh
 cmake -S . -B build -G Ninja
 cmake --build build
-ctest --test-dir build          # 单元测试(不需要真机)
+ctest --test-dir build          # 测试(不需要真机)
 ./build/examples/gui/qtscrcpy-gui
 ```
 
@@ -36,14 +36,59 @@ add_subdirectory(qt-scrcpy)
 target_link_libraries(myapp PRIVATE QtScrcpy::qtscrcpy)
 ```
 
+## 构建时自动包含 scrcpy 和 adb
+
+配置阶段,CMake 会下载 **scrcpy 官方发布包**(固定为 3.3.3;包里自带 `adb` 和 `scrcpy-server`),用写死在 `cmake/QtScrcpyBundle.cmake` 里的 SHA-256 校验,只留下程序需要的文件(`scrcpy`、`adb`、`scrcpy-server`、`icon.png`,Windows 另有 `.exe` 和 `.dll`;不含手册页和 `.bat`/`.vbs`)并缓存。目标程序每次**链接之后**会把这些文件复制到它旁边(只改了 CMake 选项而没有重新链接时不会重新复制),`cmake --install` 也会一并安装。库会在程序所在目录里找 `adb` / `scrcpy`(环境变量 `ADB` / `SCRCPY_EXECUTABLE` 优先),所以这样构建出来的程序在没装 scrcpy 和 adb 的机器上也能用。
+
+```sh
+cmake -S . -B build && cmake --build build
+ls build/examples/gui        # qtscrcpy-gui  adb  scrcpy  scrcpy-server  icon.png
+cmake --install build --prefix /opt/qt-scrcpy
+```
+
+**第一次配置会下载什么:** Linux x86_64 的包约 12.9 MB(解压后约 33 MB),Windows 64 位约 7.3 MB。缓存默认在各自的构建目录里(`<build>/qtscrcpy-downloads`),所以每个全新的构建目录都会重新下载;用 `QTSCRCPY_DOWNLOAD_DIR` 让多个构建目录共用同一份缓存(并发配置时会互相等待,不会冲突)。连接卡住超过 60 秒无数据会放弃并报错。**没有网络时配置会失败**,并提示三种办法:镜像、离线包、`OFF`。
+
+| 选项 | 作用 |
+| ---- | ---- |
+| `-DQTSCRCPY_BUNDLE_SCRCPY=AUTO\|ON\|OFF` | `ON`:一定要带上,做不到就报错。`AUTO`(qt-scrcpy 作为顶层项目时的默认值):scrcpy 发布了对应平台的包就带上,没有(如 Linux aarch64)就给出警告并继续、不带。`OFF`:不下载,使用系统里安装的。作为子项目时默认 `OFF` |
+| `-DQTSCRCPY_SCRCPY_MIRROR=<url>` | 从镜像下载(GitHub 访问慢时用),`http`、`https` 或 `file` 地址,后面接包文件名。校验值仍然生效,镜像无法换成别的内容(除非你同时改了下面的 SHA256) |
+| `-DQTSCRCPY_SCRCPY_ARCHIVE=<file>` | 用已经下载好的包(离线构建);相对路径相对于源码目录。同样要通过校验 |
+| `-DQTSCRCPY_DOWNLOAD_DIR=<dir>` | 下载与解压缓存目录 |
+| `-DQTSCRCPY_SCRCPY_VERSION=<v>` | 换用别的 scrcpy 版本;没有内置校验值的版本必须同时给出 `QTSCRCPY_SCRCPY_SHA256` |
+| `-DQTSCRCPY_SCRCPY_SHA256=<hash>` | 包的 SHA-256(64 位十六进制)。**设置后会替换内置校验值,即使是 3.3.3**;这些选项都是缓存变量,会一直保留到你清除它们 |
+| `-DQTSCRCPY_SCRCPY_PLATFORM=<p>` | 手动指定平台,默认按目标系统检测。取值:`linux-x86_64`、`win64`、`win32`、`macos-aarch64`、`macos-x86_64`;同时给了 `ARCHIVE` 和 `SHA256` 时可以用任意名字 |
+
+平台检测:Windows 按编译器指针宽度区分 32/64 位;Windows on ARM 没有原生包,可以用 `-DQTSCRCPY_SCRCPY_PLATFORM=win64`(x64 仿真);macOS 的 `CMAKE_OSX_ARCHITECTURES` 写了多个架构(通用二进制)时只会带上一种架构的包,并给出警告。下载失败、校验不符、压缩包里有可疑条目,都会让配置直接失败并说明原因,不会悄悄退回成"没带上"。
+
+在你自己的 CMake 项目里:
+
+```cmake
+set(QTSCRCPY_BUNDLE_SCRCPY ON)          # 作为子项目时默认是 OFF
+add_subdirectory(qt-scrcpy)
+add_executable(myapp main.cpp)
+target_link_libraries(myapp PRIVATE QtScrcpy::qtscrcpy)
+qtscrcpy_bundle_runtime(myapp INSTALL_DESTINATION bin)   # 链接后复制到 myapp 旁边,并加入 install
+```
+
+`INSTALL_DESTINATION` 必须是**程序自己的安装目录**(默认 `bin`),因为 scrcpy/adb 要和可执行文件放在一起;`NO_INSTALL` 表示只复制、不安装。不要把 `adb`、`scrcpy` 这类通用名字装进共享的 `bin`:示例程序在 Linux 上就是把程序和它们一起装进 `libexec/qt-scrcpy/`,再在 `bin/` 里放一个启动器链接(Qt 会解析链接,仍然能找到旁边的文件);Windows 和 macOS 的安装目录本来就是应用私有的。
+
+注意:
+
+- **平台验证情况:** 只有 Linux x86_64 上真正构建、运行、测试过。Windows 和 macOS 的包只验证了下载、校验、解压和复制这几步(在 Linux 主机上用对应的包做的),没有在 Windows/macOS 上配置、构建或运行过;它们的 `$ADB`、DLL、`windeployqt` 等相关说法来自读源码和压缩包清单。
+- 包里的 adb 是 platform-tools **36.0.0**。实测它和系统里的 34.0.4 共用同一个 adb server 时互不干扰(两者的 adb 协议版本都是 1.0.41;这依赖协议版本相同,没有测试过更旧的 adb)。
+- **Linux 运行要求:** scrcpy 已经把 SDL、FFmpeg、libusb 静态链接进去,但需要系统有 **glibc ≥ 2.35**(实测符号版本)和 `libudev.so.1`,显示窗口还需要 X11/Wayland 等图形库;随包的 adb 另需 `libgcc_s.so.1`。比 Ubuntu 22.04 更老的系统(glibc 2.31 等)上构建没问题,但包里的 scrcpy 起不来。
+- Windows 包会把 `adb.exe`、`scrcpy.exe` 和所需 DLL 一起复制过来;Qt 自己的运行库不在其中,请照常用 `windeployqt` / `macdeployqt` 等处理。
+- 库在 `QCoreApplication` 创建之前找不到程序所在目录里的文件(它要靠 `applicationDirPath()`),所以不要在静态/全局对象里构造 `Adb` / `Scrcpy`。
+- **分发前请先看 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。** 仓库本身不含任何二进制,是每个构建者自己下载;但把构建出来的程序分发给别人,就等于分发了它们:scrcpy 是 Apache-2.0,FFmpeg、libusb 是 LGPL,而 **adb 来自 Android SDK Platform-Tools,适用的是 Google 的 Android SDK 许可协议;它对再分发的限制是否允许这样捆绑分发,没有查证清楚**。不想分发 adb 就用 `-DQTSCRCPY_BUNDLE_SCRCPY=OFF`。`cmake --install` 会把声明文件和部分许可证文本一起装到 `share/doc/`;直接拷贝构建目录得到的只有二进制,不带任何声明。
+
 ## 查找可执行文件
 
 | 程序   | 查找顺序 |
 | ------ | -------- |
-| adb    | 环境变量 `ADB` → 程序所在目录 → `ANDROID_SDK_ROOT`/`ANDROID_HOME` 及默认 SDK 目录下的 `platform-tools` → `PATH` |
-| scrcpy | 环境变量 `SCRCPY_EXECUTABLE` → 程序所在目录 → `PATH` |
+| adb    | 环境变量 `ADB`(要能解析到一个程序,否则被忽略)→ 程序所在目录(内置的就在这里)→ `ANDROID_SDK_ROOT`/`ANDROID_HOME` 及默认 SDK 目录下的 `platform-tools` → `PATH` |
+| scrcpy | 环境变量 `SCRCPY_EXECUTABLE` → 程序所在目录(内置的就在这里)→ `PATH` |
 
-也可以随时用 `setExecutable()` 指定。`Scrcpy` 会把所用的 adb 通过 `$ADB` 传给 scrcpy(见 `setAdbExecutable()`),保证两者用同一个 adb。
+也可以随时用 `setExecutable()` 指定。`Scrcpy` 启动 scrcpy 时,通过 `$ADB` 告诉它用哪个 adb,优先级是:显式的 `setAdbExecutable()` > 环境里已有且能解析的 `$ADB`(不动它)> 与 scrcpy 真实文件同目录的 adb(符号链接会被解析;发布包里两者放在一起。Windows 上由 scrcpy 自己找,不导出 `$ADB`,因为 scrcpy 拼命令行时不给路径加引号,装在 `Program Files` 这种带空格的目录里会出错)> `Adb::findExecutable()` 会用的 adb。最后一项是因为发布包里的 scrcpy 在 Linux/macOS 上**不会**到 `PATH` 里找 adb。
 
 ## 用法
 
@@ -136,6 +181,8 @@ if (scrcpy.start(camera)) { /* ... */ } // scrcpy 版本过低等情况返回 fa
 ## 目录结构
 
 ```
+cmake/           QtScrcpyBundle.cmake:构建时下载并带上 scrcpy 和 adb
+licenses/        随安装附带的许可证文本(THIRD_PARTY_NOTICES.md 在仓库根目录)
 src/qtscrcpy/    库:Adb、DeviceMonitor、Scrcpy、ScrcpyOptions、AdbDevice、CommandResult
 examples/gui/    Qt Widgets 示例(中文界面):授权提示、屏幕/摄像头投屏选择、无线连接、截图、安装 APK、shell
 tests/           QtTest 测试;tests/fake/ 里是假的 adb / scrcpy 脚本
@@ -146,10 +193,11 @@ tests/           QtTest 测试;tests/fake/ 里是假的 adb / scrcpy 脚本
 - scrcpy 的画面显示在 **scrcpy 自己的 SDL 窗口**里,本库管理的是进程与生命周期,并不把视频嵌入 Qt 控件。要内嵌需要自己实现 scrcpy 协议和视频解码,不在本库范围内。
 - `Adb::inputText()` 受 Android `input text` 限制,只支持 ASCII。
 - 进程类测试(`tst_adb`、`tst_scrcpy`、`tst_monitor`、`tst_compat`)依赖 shell 脚本,只在类 Unix 系统上构建;解析类测试在所有平台运行。
+- 与"内置 scrcpy/adb"有关的测试:`tst_bundled`(旁边的 scrcpy/adb 能被找到并运行)和 `compat_bundled`(内置的 scrcpy 接受本库生成的参数)只在同时构建示例程序、并且确实带上了包时才有;`bundle_module` 用假的小压缩包(含 12 种恶意压缩包,需要 python3)测试 `cmake/QtScrcpyBundle.cmake` 本身,不需要网络。
 - **没有用真机验证过**。授权弹窗、摄像头采集都依赖真实手机;授权流程的测试是用假 adb 模拟 `unauthorized → device → 拔出` 的状态序列,摄像头参数则是用真实 scrcpy 3.3.3 验证"参数被接受",没有真正采集过画面。
 
 ### 对另一个 scrcpy 版本跑兼容性测试
 
 ```sh
-SCRCPY_EXECUTABLE=/path/to/scrcpy ctest --test-dir build -R compat --output-on-failure
+SCRCPY_EXECUTABLE=/path/to/scrcpy ctest --test-dir build -R '^tst_compat$' --output-on-failure
 ```

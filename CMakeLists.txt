@@ -14,6 +14,19 @@ else()
 endif()
 option(QTSCRCPY_BUILD_EXAMPLES "Build the Qt Widgets demo application" ${_qtscrcpy_top_level})
 option(QTSCRCPY_BUILD_TESTS "Build the unit tests" ${_qtscrcpy_top_level})
+# AUTO: bundle scrcpy and adb where the scrcpy project publishes a package, otherwise warn and go on;
+# ON: bundle or fail; OFF: use what is installed. Needs network access the first time (the package is
+# cached afterwards); see cmake/QtScrcpyBundle.cmake. Off by default when this is a subproject.
+if(_qtscrcpy_top_level)
+    set(_qtscrcpy_bundle_default AUTO)
+else()
+    set(_qtscrcpy_bundle_default OFF)
+endif()
+set(QTSCRCPY_BUNDLE_SCRCPY "${_qtscrcpy_bundle_default}" CACHE STRING
+    "Bundle scrcpy and adb next to the demo application: AUTO (where scrcpy publishes a package), ON (required) or OFF")
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(QtScrcpyBundle)
 
 find_package(Qt6 6.2 REQUIRED COMPONENTS Core)
 
