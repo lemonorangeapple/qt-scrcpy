@@ -91,7 +91,9 @@ public:
     // Asynchronously re-reads the device list; emits devicesChanged() if it differs.
     void refreshDevices();
     // Watches `adb track-devices` and keeps the list up to date (emits devicesChanged()).
-    // The tracker is restarted automatically if the adb server goes away.
+    // The adb server is started first, on its own: two adb clients that both find no server
+    // race to start it and one of them fails. The tracker is restarted automatically if the
+    // adb server goes away.
     void startTracking();
     void stopTracking();
     bool isTracking() const { return m_tracking; }
@@ -189,6 +191,7 @@ private:
     bool m_refreshQueued = false;
 
     bool m_tracking = false;
+    quint64 m_trackingGeneration = 0; // tells a stale start-server callback from the current one
     QProcess *m_tracker = nullptr;
     QTimer m_debounceTimer;
     QTimer m_restartTimer;

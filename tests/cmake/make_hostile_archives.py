@@ -5,6 +5,7 @@ escape-*, so a successful escape is visible without touching anything else.
 """
 import io
 import os
+import stat
 import sys
 import tarfile
 import zipfile
@@ -50,3 +51,46 @@ with zipfile.ZipFile(os.path.join(out, "drive.zip"), "w") as archive:
     archive.writestr("C:/escape-drive.txt", "x")
 with zipfile.ZipFile(os.path.join(out, "dotdot.zip"), "w") as archive:
     archive.writestr("../escape-zipdotdot.txt", "x")
+
+
+# --- entries hidden between '[' and ']' ---------------------------------------------------------
+# CMake does not split a list at ';' inside balanced brackets, so a check that turns the listing into
+# a list sees one element for "top/a[", the dangerous entry and "top/b]" - and only its first line.
+write_tar("bracket-hides-symlink.tar", [
+    regular("top/a["),
+    link("top/link", escape_dir),
+    regular("top/b]"),
+    regular("top/link/pwned.txt"),
+])
+write_tar("bracket-hides-dotdot.tar", [regular("top/a["), regular("../escape-bracket.txt"), regular("top/b]")])
+write_tar("bracket-hides-hardlink.tar", [
+    regular("top/a["),
+    link("top/hard", os.path.join(out, "escape-bracket-hard-target.txt"), hard=True),
+    regular("top/b]"),
+])
+
+# --- other kinds of entries ---------------------------------------------------------------------------
+fifo = tarfile.TarInfo("top/fifo")
+fifo.type = tarfile.FIFOTYPE
+write_tar("fifo.tar", [(fifo, None)])
+chardev = tarfile.TarInfo("top/null")
+chardev.type = tarfile.CHRTYPE
+chardev.devmajor, chardev.devminor = 1, 3
+write_tar("chardev.tar", [(chardev, None)])
+
+long_target = os.path.join(escape_dir, "x" * 150)
+with tarfile.open(os.path.join(out, "gnu-long-symlink.tar"), "w", format=tarfile.GNU_FORMAT) as archive:
+    info, data = link("top/" + "y" * 120, long_target)
+    archive.addfile(info, data)
+    info, data = regular("top/" + "y" * 120 + "/pwned.txt")
+    archive.addfile(info, data)
+
+write_tar("semicolon-name.tar", [regular("top/a;b")])
+write_tar("newline-and-bracket.tar", [regular("top/ok[\n../escape-nl.txt\ntop/]")])
+
+with zipfile.ZipFile(os.path.join(out, "zip-symlink.zip"), "w") as archive:
+    info = zipfile.ZipInfo("top/link")
+    info.create_system = 3  # Unix
+    info.external_attr = (stat.S_IFLNK | 0o777) << 16
+    archive.writestr(info, escape_dir)
+    archive.writestr("top/link/pwned.txt", "x")

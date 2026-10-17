@@ -29,6 +29,8 @@ private slots:
     void asyncVariantsMatchBlockingOnes();
     void refreshEmitsOnlyOnChange();
     void tracking();
+    void trackingStartsTheServerBeforeTheTracker();
+    void stoppingBeforeTheServerIsUpCancelsTracking();
     void trackingWithoutAdbReportsError();
     void killServerStopsTracking();
 
@@ -320,6 +322,41 @@ void TstAdb::tracking()
     writeDevices("");
     QTest::qWait(400);
     QCOMPARE(spy.count(), 2);
+}
+
+void TstAdb::trackingStartsTheServerBeforeTheTracker()
+{
+    QSignalSpy spy(m_adb, &Adb::devicesChanged);
+    m_adb->startTracking();
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+    m_adb->stopTracking();
+
+    // Two clients starting on a cold server race for it (adb 36: "failed to start daemon"), so
+    // the server is started by itself before `track-devices` and the first `devices -l`.
+    const QStringList calls = logContents().split('\n', Qt::SkipEmptyParts);
+    int startServer = -1, tracker = -1, devices = -1;
+    for (int i = 0; i < calls.size(); ++i) {
+        if (startServer < 0 && calls[i].startsWith("start-server"))
+            startServer = i;
+        if (tracker < 0 && calls[i].startsWith("track-devices"))
+            tracker = i;
+        if (devices < 0 && calls[i].startsWith("devices"))
+            devices = i;
+    }
+    QVERIFY2(startServer >= 0, qPrintable(calls.join('|')));
+    QVERIFY2(tracker > startServer, qPrintable(calls.join('|')));
+    QVERIFY2(devices > startServer, qPrintable(calls.join('|')));
+}
+
+void TstAdb::stoppingBeforeTheServerIsUpCancelsTracking()
+{
+    QSignalSpy spy(m_adb, &Adb::devicesChanged);
+    m_adb->startTracking();
+    m_adb->stopTracking(); // before the start-server call has finished
+    QTest::qWait(600);
+    QVERIFY(!m_adb->isTracking());
+    QCOMPARE(spy.count(), 0);
+    QVERIFY2(!logContents().contains("track-devices"), qPrintable(logContents()));
 }
 
 void TstAdb::trackingWithoutAdbReportsError()

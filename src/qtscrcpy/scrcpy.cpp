@@ -62,7 +62,7 @@ void Scrcpy::setExecutable(const QString &executable)
 
 bool Scrcpy::isAvailable() const
 {
-    return !QStandardPaths::findExecutable(m_executable).isEmpty();
+    return !resolveExecutable(m_executable).isEmpty();
 }
 
 ScrcpyVersion Scrcpy::version() const
@@ -84,12 +84,12 @@ QString Scrcpy::effectiveAdbExecutable() const
     // The user's own choice, if it works (a $ADB that does not resolve is ignored here and
     // by Adb::findExecutable() alike, instead of the two disagreeing).
     const QString environmentAdb = qEnvironmentVariable("ADB");
-    if (!environmentAdb.isEmpty() && !QStandardPaths::findExecutable(environmentAdb).isEmpty())
+    if (!environmentAdb.isEmpty() && !resolveExecutable(environmentAdb).isEmpty())
         return {}; // scrcpy reads $ADB itself
 
     // Packages from the scrcpy project contain adb next to scrcpy and their scrcpy looks
     // there, in the directory of the real file (symbolic links are resolved).
-    const QString scrcpyPath = QStandardPaths::findExecutable(m_executable);
+    const QString scrcpyPath = resolveExecutable(m_executable);
     if (!scrcpyPath.isEmpty()) {
         const QString realPath = QFileInfo(scrcpyPath).canonicalFilePath();
         const QString sibling = QStandardPaths::findExecutable(QStringLiteral("adb"),
@@ -140,6 +140,9 @@ bool Scrcpy::start(const ScrcpyOptions &options)
 #endif
     if (!adb.isEmpty())
         environment.insert(QStringLiteral("ADB"), adb);
+    else if (environment.contains(QStringLiteral("ADB"))
+             && resolveExecutable(environment.value(QStringLiteral("ADB"))).isEmpty())
+        environment.remove(QStringLiteral("ADB")); // a stale $ADB would only make scrcpy fail; let it look for itself
     m_process.setProcessEnvironment(environment);
 
     m_stdoutBuffer.clear();

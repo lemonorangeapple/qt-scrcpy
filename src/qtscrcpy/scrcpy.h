@@ -36,7 +36,7 @@ public:
     // set here; the environment's own $ADB if it resolves to a program (left alone); an adb
     // in the directory of the real scrcpy file (scrcpy release packages ship both together;
     // on Windows scrcpy finds it by itself, so nothing is exported); the adb that
-    // Adb::findExecutable() finds (application directory, $ADB, SDK directories, $PATH),
+    // Adb::findExecutable() finds ($ADB, application directory, SDK directories, $PATH),
     // because a scrcpy from a release package never looks in $PATH on Linux and macOS.
     QString adbExecutable() const { return m_adbExecutable; }
     void setAdbExecutable(const QString &adb) { m_adbExecutable = adb; }

@@ -22,8 +22,16 @@ if(_qtscrcpy_top_level)
 else()
     set(_qtscrcpy_bundle_default OFF)
 endif()
+# A parent project may have set QTSCRCPY_BUNDLE_SCRCPY as a normal variable before add_subdirectory(). Unless
+# policy CMP0126 (CMake 3.21) is NEW, set(... CACHE ...) deletes a normal variable of the same name, so put it back.
+if(DEFINED QTSCRCPY_BUNDLE_SCRCPY)
+    set(_qtscrcpy_bundle_requested "${QTSCRCPY_BUNDLE_SCRCPY}")
+endif()
 set(QTSCRCPY_BUNDLE_SCRCPY "${_qtscrcpy_bundle_default}" CACHE STRING
     "Bundle scrcpy and adb next to the demo application: AUTO (where scrcpy publishes a package), ON (required) or OFF")
+if(DEFINED _qtscrcpy_bundle_requested)
+    set(QTSCRCPY_BUNDLE_SCRCPY "${_qtscrcpy_bundle_requested}")
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(QtScrcpyBundle)

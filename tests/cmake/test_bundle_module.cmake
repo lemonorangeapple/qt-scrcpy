@@ -53,16 +53,23 @@ endfunction()
 
 # Configures (and optionally builds) the harness; sets <prefix>_rc and <prefix>_out.
 function(run_harness prefix)
-    cmake_parse_arguments(ARG "BUILD;SUBDIRECTORY" "NAME" "OPTIONS;ENV" ${ARGN})
+    cmake_parse_arguments(ARG "BUILD;SUBDIRECTORY" "NAME;DIR;HARNESS" "OPTIONS;ENV" ${ARGN})
+    set(source_dir "${HARNESS_DIR}")
+    if(ARG_HARNESS)
+        set(source_dir "${ARG_HARNESS}")
+    endif()
     math(EXPR n "${case_number} + 1")
     set(case_number ${n} PARENT_SCOPE)
     set(build_dir "${WORK_DIR}/case-${n}-${ARG_NAME}")
+    if(ARG_DIR)
+        set(build_dir "${WORK_DIR}/${ARG_DIR}") # a directory name chosen by the case
+    endif()
     file(REMOVE_RECURSE "${build_dir}")
     set(options -DMODULE_DIR=${MODULE_DIR} -DQTSCRCPY_DOWNLOAD_DIR=${build_dir}/dl ${ARG_OPTIONS})
     if(ARG_SUBDIRECTORY)
         list(APPEND options -DUSE_SUBDIRECTORY=ON)
     endif()
-    execute_process(COMMAND ${CMAKE_COMMAND} -E env ${ARG_ENV} ${CMAKE_COMMAND} -S "${HARNESS_DIR}" -B "${build_dir}" ${options}
+    execute_process(COMMAND ${CMAKE_COMMAND} -E env ${ARG_ENV} ${CMAKE_COMMAND} -S "${source_dir}" -B "${build_dir}" ${options}
                     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
     set(all "${out}\n${err}")
     if(ARG_BUILD AND rc EQUAL 0)
@@ -151,6 +158,23 @@ file(WRITE "${extract_dir}/.qtscrcpy-extracted" "planted\n")
 execute_process(COMMAND ${CMAKE_COMMAND} -S "${HARNESS_DIR}" -B "${r_dir}" RESULT_VARIABLE rc OUTPUT_QUIET ERROR_QUIET)
 file(READ "${extract_dir}/runtime/adb" adb_text)
 check_true("a marker that does not name the archive's hash triggers a fresh extraction" rc EQUAL 0 AND NOT adb_text MATCHES "PLANTED")
+# A configure that finds a complete cache must not write to it (it may be read-only, e.g. a shared CI cache).
+function(snapshot_tree dir out)
+    file(GLOB_RECURSE all LIST_DIRECTORIES true "${dir}/*" "${dir}/.*")
+    list(SORT all)
+    set(text "")
+    foreach(item IN LISTS all)
+        file(TIMESTAMP "${item}" stamp "%s")
+        string(APPEND text "${item} ${stamp}\n")
+    endforeach()
+    set(${out} "${text}" PARENT_SCOPE)
+endfunction()
+execute_process(COMMAND ${CMAKE_COMMAND} -E sleep 1.1)  # timestamps have one-second resolution here
+snapshot_tree("${r_dir}/dl" before_tree)
+execute_process(COMMAND ${CMAKE_COMMAND} -S "${HARNESS_DIR}" -B "${r_dir}" RESULT_VARIABLE rc OUTPUT_QUIET ERROR_QUIET)
+snapshot_tree("${r_dir}/dl" after_tree)
+check_true("a complete cache is only read, never written (no lock file, no touched files)" rc EQUAL 0 AND before_tree STREQUAL after_tree)
+
 file(REMOVE "${extract_dir}/runtime/adb")
 execute_process(COMMAND ${CMAKE_COMMAND} -S "${HARNESS_DIR}" -B "${r_dir}" RESULT_VARIABLE rc OUTPUT_QUIET ERROR_QUIET)
 check_true("a package that lost a file is unpacked again" rc EQUAL 0 AND EXISTS "${extract_dir}/runtime/adb")
@@ -178,14 +202,23 @@ file(MAKE_DIRECTORY "${WORK_DIR}/race")
 set(race_options -DMODULE_DIR=${MODULE_DIR} -DQTSCRCPY_DOWNLOAD_DIR=${WORK_DIR}/race/dl -DQTSCRCPY_SCRCPY_MIRROR=file://${WORK_DIR}/mirror-good
                  -DQTSCRCPY_SCRCPY_VERSION=1.0 -DQTSCRCPY_SCRCPY_SHA256=${good_hash} -DQTSCRCPY_SCRCPY_PLATFORM=linux-x86_64)
 # (Separate background processes: the COMMANDs of one execute_process are piped into each other.)
+function(shell_quote text out)
+    string(REPLACE "'" "'\\''" escaped "${text}")
+    set(${out} "'${escaped}'" PARENT_SCOPE)
+endfunction()
 set(race_script "${WORK_DIR}/race/run.sh")
 file(WRITE "${race_script}" "#!/bin/sh\n")
 foreach(i 1 2 3 4)
-    file(APPEND "${race_script}" "(\"${CMAKE_COMMAND}\" -S \"${HARNESS_DIR}\" -B \"${WORK_DIR}/race/b${i}\"")
+    shell_quote("${CMAKE_COMMAND}" q_cmake)
+    shell_quote("${HARNESS_DIR}" q_harness)
+    shell_quote("${WORK_DIR}/race/b${i}" q_build)
+    shell_quote("${WORK_DIR}/race/rc${i}" q_rc)
+    file(APPEND "${race_script}" "(${q_cmake} -S ${q_harness} -B ${q_build}")
     foreach(option IN LISTS race_options)
-        file(APPEND "${race_script}" " \"${option}\"")
+        shell_quote("${option}" q_option)
+        file(APPEND "${race_script}" " ${q_option}")
     endforeach()
-    file(APPEND "${race_script}" " >/dev/null 2>&1; echo $? > \"${WORK_DIR}/race/rc${i}\") &\n")
+    file(APPEND "${race_script}" " >/dev/null 2>&1; echo $? > ${q_rc}) &\n")
 endforeach()
 file(APPEND "${race_script}" "wait\n")
 execute_process(COMMAND sh "${race_script}")
@@ -200,6 +233,56 @@ foreach(i 1 2 3 4)
     check_true("racing configure ${i} produced the runtime files" EXISTS "${WORK_DIR}/race/b${i}")
 endforeach()
 
+# ---- 5d. what counts as a complete cache: every file, with the recorded size ---------------------
+run_harness(r NAME manifest OPTIONS -DQTSCRCPY_SCRCPY_ARCHIVE=${good_archive} -DQTSCRCPY_SCRCPY_SHA256=${good_hash} -DQTSCRCPY_SCRCPY_VERSION=1.0 -DQTSCRCPY_SCRCPY_PLATFORM=custom)
+file(GLOB extract_dirs "${r_dir}/dl/scrcpy-custom-*")
+list(GET extract_dirs 0 extract_dir)
+file(REMOVE "${extract_dir}/runtime/icon.png")
+execute_process(COMMAND ${CMAKE_COMMAND} -S "${HARNESS_DIR}" -B "${r_dir}" RESULT_VARIABLE rc OUTPUT_QUIET ERROR_QUIET)
+check_true("a package that lost icon.png is unpacked again" rc EQUAL 0 AND EXISTS "${extract_dir}/runtime/icon.png")
+file(WRITE "${extract_dir}/runtime/adb" "")
+execute_process(COMMAND ${CMAKE_COMMAND} -S "${HARNESS_DIR}" -B "${r_dir}" RESULT_VARIABLE rc OUTPUT_QUIET ERROR_QUIET)
+file(SIZE "${extract_dir}/runtime/adb" adb_size)
+check_true("an empty adb is not accepted as complete" rc EQUAL 0 AND adb_size GREATER 0)
+
+# ---- 5e. switching to OFF leaves no outputs of the earlier configure behind ------------------------
+execute_process(COMMAND ${CMAKE_COMMAND} -S "${HARNESS_DIR}" -B "${r_dir}" -DQTSCRCPY_BUNDLE_SCRCPY=OFF RESULT_VARIABLE rc OUTPUT_QUIET ERROR_QUIET)
+file(READ "${r_dir}/CMakeCache.txt" cache_text)
+check_true("OFF after ON: QTSCRCPY_BUNDLE_ROOT / VERSION are gone from the cache" rc EQUAL 0 AND NOT cache_text MATCHES "QTSCRCPY_BUNDLE_ROOT" AND NOT cache_text MATCHES "QTSCRCPY_BUNDLE_VERSION")
+
+# ---- 5f. directory names that used to break the unpack ------------------------------------------------
+# Non-ASCII in a C locale made libarchive read stdin and "succeed" with an empty listing; [x] was a glob.
+foreach(dir_name "构建 目录" "bracket [x] dir" "dollar \$d and \`tick\` and 'quote' and (parens) & amp")
+    string(MD5 label "${dir_name}")
+    string(SUBSTRING "${label}" 0 6 label)
+    run_harness(r NAME odd-${label} BUILD DIR "odd ${label}/${dir_name}/build"
+        ENV LC_ALL=C LANG=C LANGUAGE=
+        OPTIONS -DQTSCRCPY_SCRCPY_ARCHIVE=${good_archive} -DQTSCRCPY_SCRCPY_SHA256=${good_hash} -DQTSCRCPY_SCRCPY_VERSION=1.0 -DQTSCRCPY_SCRCPY_PLATFORM=custom)
+    check_true("build dir '${dir_name}' with the C locale: configure and build work" r_rc EQUAL 0 AND EXISTS "${r_dir}/adb")
+endforeach()
+
+# ---- 5g. several targets writing into one output directory, built in parallel ---------------------------
+set(big_tree "${WORK_DIR}/tree-big/scrcpy-fake-v1.0")
+file(MAKE_DIRECTORY "${big_tree}")
+foreach(program scrcpy adb)
+    execute_process(COMMAND dd if=/dev/zero of=${big_tree}/${program} bs=1048576 count=12 status=none)
+    execute_process(COMMAND chmod 755 "${big_tree}/${program}")
+endforeach()
+file(WRITE "${big_tree}/scrcpy-server" "server\n")
+execute_process(COMMAND ${CMAKE_COMMAND} -E tar czf "${WORK_DIR}/big.tar.gz" "scrcpy-fake-v1.0" WORKING_DIRECTORY "${WORK_DIR}/tree-big")
+file(SHA256 "${WORK_DIR}/big.tar.gz" big_hash)
+set(parallel_failures 0)
+foreach(round RANGE 1 8)
+    run_harness(r NAME parallel-${round} BUILD OPTIONS -DTARGET_COUNT=6 -DQTSCRCPY_SCRCPY_ARCHIVE=${WORK_DIR}/big.tar.gz -DQTSCRCPY_SCRCPY_SHA256=${big_hash} -DQTSCRCPY_SCRCPY_VERSION=1.0 -DQTSCRCPY_SCRCPY_PLATFORM=custom)
+    execute_process(COMMAND ${CMAKE_COMMAND} --build "${r_dir}" --clean-first -- -j8 RESULT_VARIABLE rebuild_rc OUTPUT_QUIET ERROR_QUIET)
+    if(NOT r_rc EQUAL 0 OR NOT rebuild_rc EQUAL 0)
+        math(EXPR parallel_failures "${parallel_failures} + 1")
+    endif()
+endforeach()
+check_true("six bundling targets sharing one output directory build in parallel without errors" parallel_failures EQUAL 0)
+execute_process(COMMAND ${CMAKE_COMMAND} -E compare_files "${WORK_DIR}/tree-big/scrcpy-fake-v1.0/adb" "${r_dir}/adb" RESULT_VARIABLE same)
+check_true("...and the copied files are intact" same EQUAL 0)
+
 # ---- 6. unsupported platform: AUTO warns and carries on, ON fails --------------------------------
 file(WRITE "${WORK_DIR}/toolchain-aarch64.cmake" "set(CMAKE_SYSTEM_NAME Linux)\nset(CMAKE_SYSTEM_PROCESSOR aarch64)\nset(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)\n")
 run_harness(r NAME aarch64-auto OPTIONS -DCMAKE_TOOLCHAIN_FILE=${WORK_DIR}/toolchain-aarch64.cmake -DQTSCRCPY_BUNDLE_SCRCPY=AUTO)
@@ -212,6 +295,23 @@ run_harness(r NAME off OPTIONS -DQTSCRCPY_BUNDLE_SCRCPY=OFF)
 check_true("OFF: nothing is fetched or created" r_rc EQUAL 0 AND r_out MATCHES "bundle_ready=FALSE" AND NOT EXISTS "${r_dir}/dl")
 run_harness(r NAME bad-mode OPTIONS -DQTSCRCPY_BUNDLE_SCRCPY=maybe)
 check_true("an invalid mode is rejected" NOT r_rc EQUAL 0 AND r_out MATCHES "must be AUTO, ON or OFF")
+
+# ---- 6b. a mode chosen with a normal variable (as the README recipe does) survives qt-scrcpy's own cache entry ----
+# set(CACHE) deletes a normal variable of the same name unless policy CMP0126 is NEW (3.21+); the project
+# declares 3.16, so the variable has to be put back. With examples enabled the first use of the mode is in
+# a directory below qt-scrcpy's, where the lost variable used to turn bundling off silently.
+if(QT_SCRCPY_DIR AND WITH_QT)
+    foreach(examples OFF ON)
+        run_harness(r NAME consumer-examples-${examples} DIR "consumer-examples-${examples}"
+            HARNESS "${HARNESS_DIR}/../consumer"
+            OPTIONS -DQT_SCRCPY_DIR=${QT_SCRCPY_DIR} -DQTSCRCPY_BUILD_EXAMPLES=${examples} -DQTSCRCPY_BUILD_TESTS=OFF
+                    -DQTSCRCPY_SCRCPY_ARCHIVE=${good_archive} -DQTSCRCPY_SCRCPY_SHA256=${good_hash}
+                    -DQTSCRCPY_SCRCPY_VERSION=1.0 -DQTSCRCPY_SCRCPY_PLATFORM=custom)
+        check_true("subproject recipe with examples ${examples}: bundling happens" r_rc EQUAL 0 AND r_out MATCHES "CONSUMER bundle_ready=TRUE" AND NOT r_out MATCHES "not bundling")
+    endforeach()
+else()
+    message(STATUS "skipped: subproject recipe (no Qt6 or QT_SCRCPY_DIR)")
+endif()
 
 # ---- 7. usable from another directory scope (qt-scrcpy as a subproject), relative archive paths ----
 run_harness(r NAME subdirectory BUILD SUBDIRECTORY OPTIONS -DQTSCRCPY_SCRCPY_ARCHIVE=${good_archive} -DQTSCRCPY_SCRCPY_SHA256=${good_hash} -DQTSCRCPY_SCRCPY_VERSION=1.0 -DQTSCRCPY_SCRCPY_PLATFORM=custom)
@@ -235,13 +335,30 @@ if(PYTHON)
     foreach(archive IN LISTS hostile)
         get_filename_component(label "${archive}" NAME)
         file(SHA256 "${archive}" hostile_hash)
+        # Symlink attacks write into escape-dir/ under a harmless-looking name: start every case with it empty.
+        file(REMOVE_RECURSE "${crafted}/escape-dir")
+        file(MAKE_DIRECTORY "${crafted}/escape-dir")
         run_harness(r NAME "hostile-${label}" OPTIONS -DQTSCRCPY_SCRCPY_ARCHIVE=${archive} -DQTSCRCPY_SCRCPY_SHA256=${hostile_hash} -DQTSCRCPY_SCRCPY_VERSION=9.9.9 -DQTSCRCPY_SCRCPY_PLATFORM=custom)
         check_true("hostile archive ${label} is refused" NOT r_rc EQUAL 0)
         # Nothing may appear outside the extraction directory: escape targets are named escape-* and
         # live in ${crafted} (absolute entries, symlink targets) or are reached by "..".
-        file(GLOB_RECURSE escaped "${crafted}/escape-*" "${r_dir}/*escape*" "${WORK_DIR}/*escape-dotdot*")
+        file(GLOB_RECURSE escaped "${crafted}/escape-*" "${crafted}/escape-dir/*" "${r_dir}/*escape*" "${WORK_DIR}/*escape-dotdot*")
         list(LENGTH escaped escaped_count)
         check_true("hostile archive ${label}: no file escaped" escaped_count EQUAL 0)
+    endforeach()
+    # The guard must still see the archive when the directory is non-ASCII and the locale is C: it
+    # used to see an empty listing there and wave everything through.
+    foreach(label symlink-then-file.tar dotdot-first.tar hardlink.tar)
+        set(archive "${crafted}/${label}")
+        file(SHA256 "${archive}" hostile_hash)
+        file(REMOVE_RECURSE "${crafted}/escape-dir")
+        file(MAKE_DIRECTORY "${crafted}/escape-dir")
+        run_harness(r NAME "odd-${label}" DIR "odd-hostile-${label}/构建 目录/build" ENV LC_ALL=C LANG=C LANGUAGE=
+            OPTIONS -DQTSCRCPY_SCRCPY_ARCHIVE=${archive} -DQTSCRCPY_SCRCPY_SHA256=${hostile_hash} -DQTSCRCPY_SCRCPY_VERSION=9.9.9 -DQTSCRCPY_SCRCPY_PLATFORM=custom)
+        check_true("hostile archive ${label} is refused in a Chinese directory with the C locale" NOT r_rc EQUAL 0 AND r_out MATCHES "refusing to extract")
+        file(GLOB_RECURSE escaped "${crafted}/escape-*" "${crafted}/escape-dir/*")
+        list(LENGTH escaped escaped_count)
+        check_true("...and nothing escaped there either" escaped_count EQUAL 0)
     endforeach()
 else()
     message(STATUS "skipped: hostile archive cases (no python)")

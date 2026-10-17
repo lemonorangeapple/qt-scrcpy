@@ -6,12 +6,23 @@
 
 namespace QtScrcpy {
 
+QString resolveExecutable(const QString &program)
+{
+    if (program.isEmpty())
+        return {};
+    if (program.contains(QLatin1Char('/')) || program.contains(QLatin1Char('\\'))) {
+        const QFileInfo info(program);
+        return QStandardPaths::findExecutable(info.fileName(), {info.absolutePath()});
+    }
+    return QStandardPaths::findExecutable(program);
+}
+
 QString locateExecutable(const QString &name, const QString &envVar, const QStringList &extraDirs)
 {
     if (!envVar.isEmpty()) {
         const QString fromEnv = qEnvironmentVariable(envVar.toUtf8().constData());
         if (!fromEnv.isEmpty()) {
-            const QString resolved = QStandardPaths::findExecutable(fromEnv);
+            const QString resolved = resolveExecutable(fromEnv);
             if (!resolved.isEmpty())
                 return resolved;
         }

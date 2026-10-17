@@ -69,6 +69,6 @@ install)
     *) echo "Performing Streamed Install"; echo "Success" ;;
     esac
     ;;
-hang) sleep 10 ;;
+hang) exec sleep 10 ;; # exec: killing this script kills the sleep too
 *) echo "fake-adb:$cmd $*" ;;
 esac

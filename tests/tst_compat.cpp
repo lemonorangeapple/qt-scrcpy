@@ -2,12 +2,17 @@
 // actually installed (or $SCRCPY_EXECUTABLE). A fake adb without devices is used, so
 // scrcpy parses and validates its command line, then stops at "no ADB device" without
 // touching anything. Skipped when scrcpy is not installed.
+#include "testenvironment.h"
+
 #include <qtscrcpy/scrcpy.h>
 
+#include <QFileInfo>
 #include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtTest>
+
+#include <memory>
 
 using namespace QtScrcpy;
 
@@ -27,11 +32,26 @@ private:
 
     QTemporaryDir m_xdg; // scrcpy insists on a usable XDG_RUNTIME_DIR
     ScrcpyVersion m_version;
+    std::unique_ptr<ScopedEnvironmentVariable> m_fakeAdb;
+    std::unique_ptr<ScopedEnvironmentVariable> m_privatePort;
 };
 
 void TstCompat::initTestCase()
 {
+    // This test starts a real scrcpy. Whatever happens in the library, it must not get to a real adb
+    // or a real adb server: $ADB names the fake one, and a real adb that was started anyway would
+    // use a private port instead of the default one.
+    m_fakeAdb = std::make_unique<ScopedEnvironmentVariable>("ADB", QByteArray(FAKE_DIR "/adb"));
+    m_privatePort = std::make_unique<ScopedEnvironmentVariable>("ANDROID_ADB_SERVER_PORT", QByteArray("47123"));
+
     Scrcpy probe;
+    // compat_bundled names the scrcpy it is about; falling back to another one (or skipping) would
+    // make that test pass without having tested it.
+    const QByteArray required = qgetenv("TST_COMPAT_REQUIRE_EXECUTABLE");
+    if (!required.isEmpty()) {
+        QVERIFY2(probe.isAvailable(), qPrintable("required scrcpy is not usable: " + QString::fromLocal8Bit(required)));
+        QCOMPARE(QFileInfo(probe.executable()).canonicalFilePath(), QFileInfo(QString::fromLocal8Bit(required)).canonicalFilePath());
+    }
     if (!probe.isAvailable())
         QSKIP("scrcpy is not installed");
     m_version = probe.version();

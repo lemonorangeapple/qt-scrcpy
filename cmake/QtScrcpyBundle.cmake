@@ -26,8 +26,9 @@
 #   QTSCRCPY_SCRCPY_MIRROR   Base URL (http, https or file) to download from instead of the
 #                            GitHub release page; the package name is appended. The
 #                            checksum still applies.
-#   QTSCRCPY_SCRCPY_ARCHIVE  Path of an already downloaded package (offline builds);
-#                            relative paths are taken relative to the source directory.
+#   QTSCRCPY_SCRCPY_ARCHIVE  Path of an already downloaded package (offline builds). Give an
+#                            absolute path: CMake turns a relative -D value of a FILEPATH
+#                            entry into one relative to the directory cmake was started in.
 #   QTSCRCPY_DOWNLOAD_DIR    Where packages are downloaded and unpacked.
 #
 # Functions:
@@ -38,6 +39,10 @@
 #       Copies the package next to <target>'s executable after every link and, unless
 #       NO_INSTALL is given, installs it into <dir> (default: CMAKE_INSTALL_BINDIR - give
 #       the directory the executable is installed to, the files must be adjacent).
+#
+# The download directory (default: inside the build directory) holds what gets copied into your
+# program: keep it private to you. Anyone who can write there can replace the unpacked files
+# (the checks protect against bad downloads, bad archives and accidents, not against that).
 #
 # Needs CMake 3.16 or newer. State is kept in global properties and internal cache entries, not in the scope that
 # included this file, so the functions work when called from any directory.
@@ -55,8 +60,16 @@ function(_qtscrcpy_pinned_version out)
 endfunction()
 
 if(NOT DEFINED CACHE{QTSCRCPY_BUNDLE_SCRCPY})
+    # (Unless policy CMP0126 is NEW, set(CACHE) deletes a normal variable of the same name that the
+    # includer set to choose a mode: put it back.)
+    if(DEFINED QTSCRCPY_BUNDLE_SCRCPY)
+        set(_qtscrcpy_requested_mode "${QTSCRCPY_BUNDLE_SCRCPY}")
+    endif()
     set(QTSCRCPY_BUNDLE_SCRCPY "ON" CACHE STRING
         "Bundle scrcpy and adb next to executables: AUTO (where scrcpy publishes a package), ON (required) or OFF")
+    if(DEFINED _qtscrcpy_requested_mode)
+        set(QTSCRCPY_BUNDLE_SCRCPY "${_qtscrcpy_requested_mode}")
+    endif()
 endif()
 set_property(CACHE QTSCRCPY_BUNDLE_SCRCPY PROPERTY STRINGS AUTO ON OFF)
 set(QTSCRCPY_SCRCPY_VERSION "" CACHE STRING
@@ -151,9 +164,9 @@ function(_qtscrcpy_detect_platform out processor_out)
     set(${processor_out} "${processor}" PARENT_SCOPE)
 endfunction()
 
-# ".exe" for the Windows packages (and for a custom package of a Windows target), else "".
+# ".exe" for the Windows packages and for any package bundled for a Windows target.
 function(_qtscrcpy_exe_suffix platform out)
-    if(platform MATCHES "^win" OR (platform STREQUAL "custom" AND CMAKE_SYSTEM_NAME STREQUAL "Windows"))
+    if(platform MATCHES "^win" OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
         set(${out} ".exe" PARENT_SCOPE)
     else()
         set(${out} "" PARENT_SCOPE)
@@ -166,45 +179,95 @@ function(_qtscrcpy_redact_url url out)
     set(${out} "${redacted}" PARENT_SCOPE)
 endfunction()
 
-# Looks for entries that could write outside the extraction directory: absolute or
-# parent-relative names, and anything that is not a plain file or directory (symbolic and
-# hard links let a later entry be written through them). Sets <problem_out> to a description,
-# or to "" when the archive is fine.
-function(_qtscrcpy_check_archive_entries archive problem_out)
-    set(${problem_out} "" PARENT_SCOPE)
-    execute_process(COMMAND ${CMAKE_COMMAND} -E tar tvf "${archive}"
-                    OUTPUT_VARIABLE listing RESULT_VARIABLE result ERROR_VARIABLE error)
+# Escapes the characters CMake's file(GLOB) treats as wildcards in a path that comes from the user.
+function(_qtscrcpy_glob_escape path out)
+    string(REGEX REPLACE "[[?*]" "[\\0]" escaped "${path}")
+    set(${out} "${escaped}" PARENT_SCOPE)
+endfunction()
+
+# Runs `cmake -E tar <mode> <file_name>` inside <directory> and returns its output. The archive
+# is always named by a plain ASCII file name relative to the working directory: given a path
+# with non-ASCII characters in a C/POSIX locale, libarchive cannot convert it, silently reads
+# standard input instead and "succeeds" with no output at all.
+function(_qtscrcpy_tar mode directory file_name output_out result_out)
+    execute_process(COMMAND ${CMAKE_COMMAND} -E tar ${mode} "${file_name}"
+                    WORKING_DIRECTORY "${directory}" TIMEOUT 600
+                    OUTPUT_VARIABLE output ERROR_VARIABLE error RESULT_VARIABLE result)
     if(NOT result EQUAL 0)
-        set(${problem_out} "cannot read it as an archive: ${error}" PARENT_SCOPE)
-        return()
+        set(output "${error}")
     endif()
-    string(REPLACE "\r" "" listing "${listing}")
-    string(REPLACE "\n" ";" lines "${listing}")
-    foreach(line IN LISTS lines)
-        if(line STREQUAL "")
+    set(${output_out} "${output}" PARENT_SCOPE)
+    set(${result_out} "${result}" PARENT_SCOPE)
+endfunction()
+
+# Returns in <out> the first line of <text> that does not pass the test named by <kind>, or "".
+#   type: the `tar tv` entry type must be "-" (file) or "d"; links, devices and FIFOs are refused
+#   name: the entry name must be a plain relative path of harmless characters
+# The text is walked with string(FIND) and never turned into a CMake list: inside [ ], list
+# splitting does not split at ';', so a hostile name could hide the entries next to it.
+function(_qtscrcpy_first_bad_line text kind out)
+    set(rest "${text}")
+    set(bad "")
+    while(NOT "${rest}" STREQUAL "")
+        string(FIND "${rest}" "\n" newline)
+        if(newline EQUAL -1)
+            set(line "${rest}")
+            set(rest "")
+        else()
+            string(SUBSTRING "${rest}" 0 ${newline} line)
+            math(EXPR next "${newline} + 1")
+            string(SUBSTRING "${rest}" ${next} -1 rest)
+        endif()
+        string(REPLACE "\r" "" line "${line}")
+        if("${line}" STREQUAL "")
             continue()
         endif()
-        # `tar tv` style: the first column is the entry type, the last one the name.
-        if(NOT line MATCHES "^[-d]")
-            set(${problem_out} "it contains an entry that is not a plain file or directory (${line})" PARENT_SCOPE)
-            return()
+        if(kind STREQUAL "type")
+            if(NOT "${line}" MATCHES "^[-d]")
+                set(bad "${line}")
+                break()
+            endif()
+        else()
+            # The names of the official packages use letters, digits and . _ + - only.
+            if(NOT "${line}" MATCHES "^[A-Za-z0-9._+/ -]+$" OR "${line}" MATCHES "^/"
+               OR "${line}" MATCHES "(^|/)\\.\\.(/|$)")
+                set(bad "${line}")
+                break()
+            endif()
         endif()
-    endforeach()
+    endwhile()
+    set(${out} "${bad}" PARENT_SCOPE)
+endfunction()
 
-    execute_process(COMMAND ${CMAKE_COMMAND} -E tar tf "${archive}"
-                    OUTPUT_VARIABLE names RESULT_VARIABLE result ERROR_VARIABLE error)
-    if(NOT result EQUAL 0)
-        set(${problem_out} "cannot read it as an archive: ${error}" PARENT_SCOPE)
+# Looks for entries that could write outside the extraction directory: absolute or
+# parent-relative names, names with unusual characters, and anything that is not a plain file
+# or directory (symbolic and hard links let a later entry be written through them).
+# <archive_dir>/<archive_name> is the archive. Sets <problem_out> to a description, or to ""
+# when the archive is fine.
+function(_qtscrcpy_check_archive_entries archive_dir archive_name problem_out)
+    set(${problem_out} "" PARENT_SCOPE)
+    _qtscrcpy_tar(tvf "${archive_dir}" "${archive_name}" listing result)
+    if(NOT result EQUAL 0 OR "${listing}" STREQUAL "")
+        # (An empty listing is never a good sign: a check that saw nothing proves nothing.)
+        set(${problem_out} "cannot read it as an archive (${listing})" PARENT_SCOPE)
         return()
     endif()
-    string(REPLACE "\r" "" names "${names}")
-    string(REPLACE "\n" ";" name_list "${names}")
-    foreach(name IN LISTS name_list)
-        if(name MATCHES "^[/\\\\]" OR name MATCHES "^[A-Za-z]:" OR name MATCHES "(^|[/\\\\])\\.\\.([/\\\\]|$)")
-            set(${problem_out} "it contains the absolute or parent-relative path '${name}'" PARENT_SCOPE)
-            return()
-        endif()
-    endforeach()
+    _qtscrcpy_first_bad_line("${listing}" type bad_line)
+    if(NOT "${bad_line}" STREQUAL "")
+        set(${problem_out} "it contains an entry that is not a plain file or directory (${bad_line})" PARENT_SCOPE)
+        return()
+    endif()
+
+    _qtscrcpy_tar(tf "${archive_dir}" "${archive_name}" names result)
+    if(NOT result EQUAL 0 OR "${names}" STREQUAL "")
+        set(${problem_out} "cannot read it as an archive (${names})" PARENT_SCOPE)
+        return()
+    endif()
+    _qtscrcpy_first_bad_line("${names}" name bad_name)
+    if(NOT "${bad_name}" STREQUAL "")
+        set(${problem_out} "it contains the entry name '${bad_name}', which is absolute, leaves the directory or has unusual characters" PARENT_SCOPE)
+        return()
+    endif()
 endfunction()
 
 # Unpacks `archive` (already verified to have SHA-256 `expected`) into <extract_dir>,
@@ -231,7 +294,7 @@ function(_qtscrcpy_unpack archive expected platform extract_dir)
         message(FATAL_ERROR "qt-scrcpy: ${archive} changed while it was being processed (SHA-256 ${copy_hash}).")
     endif()
 
-    _qtscrcpy_check_archive_entries("${private_copy}" problem)
+    _qtscrcpy_check_archive_entries("${staging}" "package.bin" problem)
     if(problem)
         file(REMOVE_RECURSE "${staging}")
         message(FATAL_ERROR "qt-scrcpy: refusing to extract ${archive}: ${problem}.")
@@ -239,15 +302,15 @@ function(_qtscrcpy_unpack archive expected platform extract_dir)
 
     set(unpacked "${staging}/unpacked")
     file(MAKE_DIRECTORY "${unpacked}")
-    execute_process(COMMAND ${CMAKE_COMMAND} -E tar xf "${private_copy}"
-                    WORKING_DIRECTORY "${unpacked}" RESULT_VARIABLE result ERROR_VARIABLE error)
+    _qtscrcpy_tar(xf "${unpacked}" "../package.bin" extract_output result)
     if(NOT result EQUAL 0)
         file(REMOVE_RECURSE "${staging}")
-        message(FATAL_ERROR "qt-scrcpy: extracting ${archive} failed: ${error}")
+        message(FATAL_ERROR "qt-scrcpy: extracting ${archive} failed: ${extract_output}")
     endif()
 
     # Packages unpack into one directory named after themselves.
-    file(GLOB entries LIST_DIRECTORIES true RELATIVE "${unpacked}" "${unpacked}/*")
+    _qtscrcpy_glob_escape("${unpacked}" unpacked_glob)
+    file(GLOB entries LIST_DIRECTORIES true RELATIVE "${unpacked}" "${unpacked_glob}/*")
     list(LENGTH entries entry_count)
     if(entry_count EQUAL 1 AND IS_DIRECTORY "${unpacked}/${entries}")
         set(package_root "${unpacked}/${entries}")
@@ -268,7 +331,8 @@ function(_qtscrcpy_unpack archive expected platform extract_dir)
         list(APPEND wanted "icon.png") # scrcpy's window icon
     endif()
     if(suffix STREQUAL ".exe")
-        file(GLOB dlls RELATIVE "${package_root}" "${package_root}/*.dll")
+        _qtscrcpy_glob_escape("${package_root}" package_root_glob)
+        file(GLOB dlls RELATIVE "${package_root}" "${package_root_glob}/*.dll")
         list(APPEND wanted ${dlls})
     endif()
 
@@ -279,7 +343,16 @@ function(_qtscrcpy_unpack archive expected platform extract_dir)
     foreach(item IN LISTS wanted)
         file(COPY "${package_root}/${item}" DESTINATION "${runtime}")
     endforeach()
-    file(WRITE "${staging}/.qtscrcpy-extracted" "${expected}\n")
+    # The marker records the archive hash and the SHA-256 of every file kept: a package that lost
+    # a file, holds an empty or changed one (an antivirus tool, a careless clean-up, a stray
+    # write) is not "complete" and is unpacked again. This does not protect against someone who
+    # can write the download directory (they can write a marker too): keep it private to you.
+    set(manifest "${expected}\n")
+    foreach(item IN LISTS wanted)
+        file(SHA256 "${runtime}/${item}" item_hash)
+        string(APPEND manifest "${item} ${item_hash}\n")
+    endforeach()
+    file(WRITE "${staging}/.qtscrcpy-extracted" "${manifest}")
 
     file(REMOVE_RECURSE "${unpacked}" "${private_copy}")
     file(REMOVE_RECURSE "${extract_dir}")
@@ -287,20 +360,36 @@ function(_qtscrcpy_unpack archive expected platform extract_dir)
 endfunction()
 
 # Sets <out> to TRUE when <dir> (an extraction directory) holds a complete runtime of the
-# package with SHA-256 `expected`: the marker must name that hash and the programs must still
-# be there.
-function(_qtscrcpy_runtime_is_complete dir expected platform out)
+# package with SHA-256 `expected`: the marker must name that hash, and every file it lists must
+# be there (as a file) with the recorded SHA-256.
+function(_qtscrcpy_runtime_is_complete dir expected out)
     set(ok FALSE)
-    _qtscrcpy_exe_suffix("${platform}" suffix)
     set(marker "${dir}/.qtscrcpy-extracted")
     if(EXISTS "${marker}")
-        file(READ "${marker}" recorded)
-        string(STRIP "${recorded}" recorded)
-        if(recorded STREQUAL expected
-           AND EXISTS "${dir}/runtime/scrcpy${suffix}" AND NOT IS_DIRECTORY "${dir}/runtime/scrcpy${suffix}"
-           AND EXISTS "${dir}/runtime/adb${suffix}" AND NOT IS_DIRECTORY "${dir}/runtime/adb${suffix}"
-           AND EXISTS "${dir}/runtime/scrcpy-server" AND NOT IS_DIRECTORY "${dir}/runtime/scrcpy-server")
+        file(STRINGS "${marker}" lines)
+        list(LENGTH lines line_count)
+        list(GET lines 0 recorded)
+        if(line_count GREATER 1 AND recorded STREQUAL expected)
             set(ok TRUE)
+            list(REMOVE_AT lines 0)
+            foreach(line IN LISTS lines)
+                if(NOT line MATCHES "^(.+) ([0-9a-f]+)$")
+                    set(ok FALSE)
+                    break()
+                endif()
+                set(file_name "${CMAKE_MATCH_1}")
+                set(recorded_hash "${CMAKE_MATCH_2}")
+                set(path "${dir}/runtime/${file_name}")
+                if(NOT EXISTS "${path}" OR IS_DIRECTORY "${path}")
+                    set(ok FALSE)
+                    break()
+                endif()
+                file(SHA256 "${path}" actual_hash)
+                if(NOT actual_hash STREQUAL recorded_hash)
+                    set(ok FALSE)
+                    break()
+                endif()
+            endforeach()
         endif()
     endif()
     set(${out} ${ok} PARENT_SCOPE)
@@ -309,6 +398,9 @@ endfunction()
 # Resolves the options and, when bundling is wanted, makes the package available.
 # Sets the global property QTSCRCPY_BUNDLE_STATE to "ready" or "skipped".
 function(_qtscrcpy_resolve)
+    # Outputs of an earlier configure must not outlive a switch to OFF or a skipped AUTO.
+    unset(QTSCRCPY_BUNDLE_ROOT CACHE)
+    unset(QTSCRCPY_BUNDLE_VERSION CACHE)
     _qtscrcpy_bundle_mode(mode)
     if(mode STREQUAL "OFF")
         message(STATUS "qt-scrcpy: not bundling scrcpy and adb (QTSCRCPY_BUNDLE_SCRCPY=OFF)")
@@ -391,15 +483,10 @@ function(_qtscrcpy_resolve)
             "Set QTSCRCPY_SCRCPY_SHA256 to the SHA-256 of the package, or use -DQTSCRCPY_BUNDLE_SCRCPY=OFF.")
     endif()
 
-    # Several configures (a CI matrix, parallel build trees) may share one download directory:
-    # let them take turns, so the second finds a finished cache instead of racing the first.
-    file(MAKE_DIRECTORY "${QTSCRCPY_DOWNLOAD_DIR}")
-    file(LOCK "${QTSCRCPY_DOWNLOAD_DIR}/.qtscrcpy.lock" GUARD FUNCTION TIMEOUT 900 RESULT_VARIABLE lock_result)
-    if(NOT lock_result EQUAL 0)
-        message(FATAL_ERROR "qt-scrcpy: could not lock ${QTSCRCPY_DOWNLOAD_DIR} (${lock_result}); is another configure stuck?")
-    endif()
+    string(SUBSTRING "${expected}" 0 12 short_hash)
+    set(extract_dir "${QTSCRCPY_DOWNLOAD_DIR}/scrcpy-${platform}-v${version}-${short_hash}")
 
-    # ---- the archive: a local one, the cached download, or a fresh download ----
+    # A package the user brought is checked every time (read-only).
     if(QTSCRCPY_SCRCPY_ARCHIVE)
         get_filename_component(archive "${QTSCRCPY_SCRCPY_ARCHIVE}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
         if(NOT EXISTS "${archive}")
@@ -410,64 +497,82 @@ function(_qtscrcpy_resolve)
             message(FATAL_ERROR
                 "qt-scrcpy: SHA-256 mismatch for ${archive}\n  expected ${expected}\n  actual   ${actual}")
         endif()
-    else()
-        set(archive "${QTSCRCPY_DOWNLOAD_DIR}/${file_name}")
-        set(cached FALSE)
-        if(EXISTS "${archive}")
-            file(SHA256 "${archive}" actual)
-            if(actual STREQUAL expected)
-                set(cached TRUE)
-            endif()
-        endif()
-        if(NOT cached)
-            if(QTSCRCPY_SCRCPY_MIRROR)
-                if(NOT QTSCRCPY_SCRCPY_MIRROR MATCHES "^(https?|file)://")
-                    message(FATAL_ERROR "qt-scrcpy: QTSCRCPY_SCRCPY_MIRROR must be an http, https or file URL.")
-                endif()
-                string(REGEX REPLACE "/+$" "" base "${QTSCRCPY_SCRCPY_MIRROR}")
-            else()
-                set(base "https://github.com/Genymobile/scrcpy/releases/download/v${version}")
-            endif()
-            set(url "${base}/${file_name}")
-            _qtscrcpy_redact_url("${url}" shown_url)
-
-            # Download beside the target and only move a file that passed the check into
-            # place, so the cache never holds a partial or wrong file.
-            set(part "${archive}.part")
-            file(REMOVE "${part}")
-            message(STATUS "qt-scrcpy: fetching ${shown_url}")
-            file(DOWNLOAD "${url}" "${part}" INACTIVITY_TIMEOUT 60 TLS_VERIFY ON STATUS download_status)
-            list(GET download_status 0 download_code)
-            list(GET download_status 1 download_message)
-            if(NOT download_code EQUAL 0)
-                file(REMOVE "${part}")
-                message(FATAL_ERROR
-                    "qt-scrcpy: could not download ${shown_url}\n  ${download_message} (code ${download_code})\n"
-                    "Options: -DQTSCRCPY_SCRCPY_MIRROR=<base url>, -DQTSCRCPY_SCRCPY_ARCHIVE=<downloaded file>, "
-                    "or -DQTSCRCPY_BUNDLE_SCRCPY=OFF to use the scrcpy and adb installed on the machine.")
-            endif()
-            file(SHA256 "${part}" actual)
-            if(NOT actual STREQUAL expected)
-                file(REMOVE "${part}")
-                message(FATAL_ERROR
-                    "qt-scrcpy: the file downloaded from ${shown_url} does not match the pinned checksum of ${file_name}\n"
-                    "  expected ${expected}\n  actual   ${actual}\n"
-                    "It was discarded. A mirror may be serving something else.")
-            endif()
-            file(RENAME "${part}" "${archive}")
-        endif()
     endif()
 
-    # ---- unpack once ----
-    string(SUBSTRING "${expected}" 0 12 short_hash)
-    set(extract_dir "${QTSCRCPY_DOWNLOAD_DIR}/scrcpy-${platform}-v${version}-${short_hash}")
-    _qtscrcpy_runtime_is_complete("${extract_dir}" "${expected}" "${platform}" complete)
+    # Nothing to do (and nothing written: a read-only cache works) when the runtime was already
+    # unpacked. It is put in place by a rename, so what is seen here is always a whole one.
+    _qtscrcpy_runtime_is_complete("${extract_dir}" "${expected}" complete)
     if(NOT complete)
+        # Several configures (a CI matrix, parallel build trees) may share one download
+        # directory: let them take turns, so the second finds a finished cache instead of
+        # racing the first.
+        file(MAKE_DIRECTORY "${QTSCRCPY_DOWNLOAD_DIR}")
+        if(IS_DIRECTORY "${QTSCRCPY_DOWNLOAD_DIR}/.qtscrcpy.lock")
+            message(FATAL_ERROR "qt-scrcpy: ${QTSCRCPY_DOWNLOAD_DIR}/.qtscrcpy.lock is a directory; remove it.")
+        endif()
+        file(LOCK "${QTSCRCPY_DOWNLOAD_DIR}/.qtscrcpy.lock" GUARD FUNCTION TIMEOUT 900 RESULT_VARIABLE lock_result)
+        if(NOT lock_result EQUAL 0)
+            message(FATAL_ERROR "qt-scrcpy: could not lock ${QTSCRCPY_DOWNLOAD_DIR} (${lock_result}); is another configure stuck?")
+        endif()
+        # (Whoever held the lock may have finished the job.)
+        _qtscrcpy_runtime_is_complete("${extract_dir}" "${expected}" complete)
+    endif()
+
+    if(NOT complete)
+        if(NOT QTSCRCPY_SCRCPY_ARCHIVE)
+            # ---- the archive: the cached download or a fresh one ----
+            set(archive "${QTSCRCPY_DOWNLOAD_DIR}/${file_name}")
+            set(cached FALSE)
+            if(EXISTS "${archive}")
+                file(SHA256 "${archive}" actual)
+                if(actual STREQUAL expected)
+                    set(cached TRUE)
+                endif()
+            endif()
+            if(NOT cached)
+                if(QTSCRCPY_SCRCPY_MIRROR)
+                    if(NOT QTSCRCPY_SCRCPY_MIRROR MATCHES "^(https?|file)://")
+                        message(FATAL_ERROR "qt-scrcpy: QTSCRCPY_SCRCPY_MIRROR must be an http, https or file URL.")
+                    endif()
+                    string(REGEX REPLACE "/+$" "" base "${QTSCRCPY_SCRCPY_MIRROR}")
+                else()
+                    set(base "https://github.com/Genymobile/scrcpy/releases/download/v${version}")
+                endif()
+                set(url "${base}/${file_name}")
+                _qtscrcpy_redact_url("${url}" shown_url)
+
+                # Download beside the target and only move a file that passed the check into
+                # place, so the cache never holds a partial or wrong file.
+                set(part "${archive}.part")
+                file(REMOVE "${part}")
+                message(STATUS "qt-scrcpy: fetching ${shown_url}")
+                file(DOWNLOAD "${url}" "${part}" INACTIVITY_TIMEOUT 60 TLS_VERIFY ON STATUS download_status)
+                list(GET download_status 0 download_code)
+                list(GET download_status 1 download_message)
+                if(NOT download_code EQUAL 0)
+                    file(REMOVE "${part}")
+                    message(FATAL_ERROR
+                        "qt-scrcpy: could not download ${shown_url}\n  ${download_message} (code ${download_code})\n"
+                        "Options: -DQTSCRCPY_SCRCPY_MIRROR=<base url>, -DQTSCRCPY_SCRCPY_ARCHIVE=<downloaded file>, "
+                        "or -DQTSCRCPY_BUNDLE_SCRCPY=OFF to use the scrcpy and adb installed on the machine.")
+                endif()
+                file(SHA256 "${part}" actual)
+                if(NOT actual STREQUAL expected)
+                    file(REMOVE "${part}")
+                    message(FATAL_ERROR
+                        "qt-scrcpy: the file downloaded from ${shown_url} does not match the pinned checksum of ${file_name}\n"
+                        "  expected ${expected}\n  actual   ${actual}\n"
+                        "It was discarded. A mirror may be serving something else.")
+                endif()
+                file(RENAME "${part}" "${archive}")
+            endif()
+        endif()
         _qtscrcpy_unpack("${archive}" "${expected}" "${platform}" "${extract_dir}")
     endif()
     set(root "${extract_dir}/runtime")
 
     message(STATUS "qt-scrcpy: bundling scrcpy ${version} (${platform}) from ${root}")
+    set_property(GLOBAL PROPERTY QTSCRCPY_BUNDLE_MARKER "${extract_dir}/.qtscrcpy-extracted")
     set(QTSCRCPY_BUNDLE_ROOT "${root}" CACHE INTERNAL "Directory with the unpacked scrcpy runtime files")
     set(QTSCRCPY_BUNDLE_VERSION "${version}" CACHE INTERNAL "scrcpy version of the bundled package")
     if(NOT version STREQUAL pinned_version OR QTSCRCPY_SCRCPY_SHA256)
@@ -503,10 +608,18 @@ function(qtscrcpy_bundle_runtime target)
         return()
     endif()
 
+    get_property(module_dir GLOBAL PROPERTY QTSCRCPY_MODULE_DIR)
     add_custom_command(TARGET ${target} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${QTSCRCPY_BUNDLE_ROOT}" "$<TARGET_FILE_DIR:${target}>"
+        COMMAND ${CMAKE_COMMAND} "-DSRC=${QTSCRCPY_BUNDLE_ROOT}" "-DDST=$<TARGET_FILE_DIR:${target}>"
+                -P "${module_dir}/copy_runtime.cmake"
         COMMENT "Bundling scrcpy and adb next to ${target}"
         VERBATIM)
+    # If the unpacked cache disappears, the next build runs CMake again and unpacks it again,
+    # instead of failing in the copy step.
+    get_property(extract_dir_marker GLOBAL PROPERTY QTSCRCPY_BUNDLE_MARKER)
+    if(extract_dir_marker)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${extract_dir_marker}")
+    endif()
 
     if(ARG_NO_INSTALL)
         return()
@@ -524,7 +637,6 @@ function(qtscrcpy_bundle_runtime target)
     # The scrcpy packages carry no licence files, so the notices travel with them (once).
     get_property(notices_done GLOBAL PROPERTY QTSCRCPY_NOTICES_INSTALLED)
     if(NOT notices_done)
-        get_property(module_dir GLOBAL PROPERTY QTSCRCPY_MODULE_DIR)
         install(FILES "${module_dir}/../THIRD_PARTY_NOTICES.md" DESTINATION "${CMAKE_INSTALL_DOCDIR}")
         install(DIRECTORY "${module_dir}/../licenses" DESTINATION "${CMAKE_INSTALL_DOCDIR}")
         set_property(GLOBAL PROPERTY QTSCRCPY_NOTICES_INSTALLED TRUE)

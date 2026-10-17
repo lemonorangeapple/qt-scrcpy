@@ -10,10 +10,12 @@ target_link_libraries(qtscrcpy-gui PRIVATE qtscrcpy Qt6::Widgets)
 include(GNUInstallDirs)
 
 # On Unix the executable and the scrcpy/adb package it brings are installed together into a private
-# directory, with a launcher link in bin: their generic names (adb, scrcpy) must not end up in a shared
-# bin directory, where they would shadow or replace the user's own. Qt resolves the link, so the
-# program still finds the package next to it. Windows and macOS installs are one private directory anyway.
-if(UNIX AND NOT APPLE)
+# directory: their generic names (adb, scrcpy) must not end up in a shared bin directory (the default
+# prefix /usr/local is also Homebrew's on macOS), where they would shadow or replace the user's own.
+# Linux also gets a launcher link in bin; Qt resolves the link, so the program still finds the package
+# next to it (not verified on macOS, so there the program is started from its private directory).
+# A Windows install goes to <Program Files>/<project> by default, which is private already.
+if(UNIX)
     set(_gui_dir "${CMAKE_INSTALL_LIBEXECDIR}/qt-scrcpy")
 else()
     set(_gui_dir "${CMAKE_INSTALL_BINDIR}")
@@ -29,22 +31,27 @@ if(BUILD_SHARED_LIBS)
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
         LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
         ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-    # Find libqtscrcpy from wherever the executable is installed.
-    file(RELATIVE_PATH _gui_to_lib "/${_gui_dir}" "/${CMAKE_INSTALL_LIBDIR}")
-    if(APPLE)
-        set_target_properties(qtscrcpy-gui PROPERTIES INSTALL_RPATH "@executable_path/${_gui_to_lib}")
-    elseif(UNIX)
-        set_target_properties(qtscrcpy-gui PROPERTIES INSTALL_RPATH "\$ORIGIN/${_gui_to_lib}")
+
+    # Find libqtscrcpy from wherever the executable is installed: relative to the executable when both
+    # directories are relative to the prefix; otherwise an absolute path (nothing relative to compute).
+    if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+        set(_gui_rpath "${CMAKE_INSTALL_LIBDIR}")
+    elseif(IS_ABSOLUTE "${_gui_dir}")
+        set(_gui_rpath "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
+    else()
+        file(RELATIVE_PATH _gui_to_lib "/${_gui_dir}" "/${CMAKE_INSTALL_LIBDIR}")
+        if(APPLE)
+            set(_gui_rpath "@executable_path/${_gui_to_lib}")
+        else()
+            set(_gui_rpath "\$ORIGIN/${_gui_to_lib}")
+        endif()
+    endif()
+    if(APPLE OR UNIX)
+        set_target_properties(qtscrcpy-gui PROPERTIES INSTALL_RPATH "${_gui_rpath}")
     endif()
 endif()
 
 if(UNIX AND NOT APPLE)
-    # bin/qtscrcpy-gui -> ../libexec/qt-scrcpy/qtscrcpy-gui (relative, so a moved prefix keeps working)
-    file(RELATIVE_PATH _gui_link_target "/${CMAKE_INSTALL_BINDIR}" "/${_gui_dir}/qtscrcpy-gui")
-    install(CODE "
-        file(MAKE_DIRECTORY \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\")
-        file(CREATE_LINK \"${_gui_link_target}\"
-             \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/qtscrcpy-gui\" SYMBOLIC)
-        message(STATUS \"Linking: \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/qtscrcpy-gui -> ${_gui_link_target}\")
-    ")
+    configure_file(install-launcher.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/install-launcher.cmake" @ONLY)
+    install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/install-launcher.cmake")
 endif()

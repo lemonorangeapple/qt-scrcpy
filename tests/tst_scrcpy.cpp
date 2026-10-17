@@ -1,3 +1,5 @@
+#include "testenvironment.h"
+
 #include <qtscrcpy/adb.h>
 #include <qtscrcpy/scrcpy.h>
 
@@ -188,19 +190,22 @@ void TstScrcpy::conflictingOptionsRefused()
     QVERIFY(logLines().isEmpty());
 }
 
-// A directory laid out like a scrcpy release package: scrcpy and adb side by side.
-static QString makePackageDir(const QTemporaryDir &dir)
+// A directory laid out like a scrcpy release package: scrcpy and adb side by side. The lookups under
+// test only accept executable files, so a TMPDIR on a noexec mount cannot be used for them.
+static bool makePackageDir(const QTemporaryDir &dir)
 {
     QFile::copy(fakeScrcpy(), dir.filePath("scrcpy"));
     QFile::copy(QStringLiteral(FAKE_DIR "/adb"), dir.filePath("adb"));
-    return dir.path();
+    return QFileInfo(dir.filePath("scrcpy")).isExecutable() && QFileInfo(dir.filePath("adb")).isExecutable();
 }
 
 void TstScrcpy::usesAdbShippedNextToScrcpy()
 {
     QTemporaryDir pkg;
-    makePackageDir(pkg);
-    qunsetenv("ADB");
+    if (!makePackageDir(pkg))
+        QSKIP("TMPDIR does not allow executable files (noexec mount?)");
+    // (the fake scrcpy is a script with an "env bash" shebang, so $PATH stays as it is)
+    IsolatedProgramEnvironment isolated(QString::fromLocal8Bit(qgetenv("PATH")), pkg.path());
 
     Scrcpy scrcpy;
     scrcpy.setExecutable(pkg.filePath("scrcpy"));
@@ -211,43 +216,6 @@ void TstScrcpy::usesAdbShippedNextToScrcpy()
     QTRY_COMPARE(scrcpy.state(), Scrcpy::State::Stopped);
 }
 
-// Keeps the lookups of Adb::findExecutable() away from whatever this machine has installed.
-class IsolatedAdbEnvironment
-{
-public:
-    IsolatedAdbEnvironment(const QString &path, const QString &home)
-        : m_path(qgetenv("PATH")), m_home(qgetenv("HOME")), m_adb(qgetenv("ADB")),
-          m_sdkRoot(qgetenv("ANDROID_SDK_ROOT")), m_androidHome(qgetenv("ANDROID_HOME")),
-          m_localAppData(qgetenv("LOCALAPPDATA"))
-    {
-        qputenv("PATH", path.toUtf8());
-        qputenv("HOME", home.toUtf8()); // ~/Android/Sdk/platform-tools is searched before $PATH
-        qunsetenv("ADB");
-        qunsetenv("ANDROID_SDK_ROOT");
-        qunsetenv("ANDROID_HOME");
-        qunsetenv("LOCALAPPDATA");
-    }
-    ~IsolatedAdbEnvironment()
-    {
-        restore("PATH", m_path);
-        restore("HOME", m_home);
-        restore("ADB", m_adb);
-        restore("ANDROID_SDK_ROOT", m_sdkRoot);
-        restore("ANDROID_HOME", m_androidHome);
-        restore("LOCALAPPDATA", m_localAppData);
-    }
-
-private:
-    static void restore(const char *name, const QByteArray &value)
-    {
-        if (value.isNull())
-            qunsetenv(name);
-        else
-            qputenv(name, value);
-    }
-    QByteArray m_path, m_home, m_adb, m_sdkRoot, m_androidHome, m_localAppData;
-};
-
 void TstScrcpy::fallsBackToTheAdbThatAdbWouldUse()
 {
     // A scrcpy from a release package never searches $PATH for adb on Linux/macOS, so with no
@@ -257,8 +225,10 @@ void TstScrcpy::fallsBackToTheAdbThatAdbWouldUse()
     QTemporaryDir pathDir; // a directory on $PATH that has an adb
     QFile::copy(QStringLiteral(FAKE_DIR "/adb"), pathDir.filePath("adb"));
     QTemporaryDir emptyDir;
+    if (!QFileInfo(lonely.filePath("scrcpy")).isExecutable() || !QFileInfo(pathDir.filePath("adb")).isExecutable())
+        QSKIP("TMPDIR does not allow executable files (noexec mount?)");
 
-    IsolatedAdbEnvironment isolated(pathDir.path(), emptyDir.path());
+    IsolatedProgramEnvironment isolated(pathDir.path(), emptyDir.path());
     Scrcpy scrcpy;
     scrcpy.setExecutable(lonely.filePath("scrcpy"));
     QCOMPARE(scrcpy.effectiveAdbExecutable(), pathDir.filePath("adb"));
@@ -273,12 +243,13 @@ void TstScrcpy::sameDirectoryAdbIsFoundThroughASymbolicLink()
     // The usual way to install the portable package: extract it, link scrcpy into a bin directory.
     // scrcpy resolves the link, so its adb is the one beside the real file.
     QTemporaryDir pkg;
-    makePackageDir(pkg);
+    if (!makePackageDir(pkg))
+        QSKIP("TMPDIR does not allow executable files (noexec mount?)");
     QTemporaryDir bin;
     QVERIFY(QFile::link(pkg.filePath("scrcpy"), bin.filePath("scrcpy")));
     QTemporaryDir emptyDir;
 
-    IsolatedAdbEnvironment isolated(emptyDir.path(), emptyDir.path());
+    IsolatedProgramEnvironment isolated(emptyDir.path(), emptyDir.path());
     Scrcpy scrcpy;
     scrcpy.setExecutable(bin.filePath("scrcpy"));
     QCOMPARE(QFileInfo(scrcpy.effectiveAdbExecutable()).canonicalFilePath(), QFileInfo(pkg.filePath("adb")).canonicalFilePath());
@@ -287,11 +258,12 @@ void TstScrcpy::sameDirectoryAdbIsFoundThroughASymbolicLink()
 void TstScrcpy::anUnresolvableEnvironmentAdbIsIgnoredLikeAdbDoes()
 {
     QTemporaryDir pkg;
-    makePackageDir(pkg);
+    if (!makePackageDir(pkg))
+        QSKIP("TMPDIR does not allow executable files (noexec mount?)");
     QTemporaryDir emptyDir;
 
-    IsolatedAdbEnvironment isolated(emptyDir.path(), emptyDir.path());
-    qputenv("ADB", "/nonexistent/adb");
+    IsolatedProgramEnvironment isolated(emptyDir.path(), emptyDir.path());
+    ScopedEnvironmentVariable staleAdb("ADB", "/nonexistent/adb");
     Scrcpy scrcpy;
     scrcpy.setExecutable(pkg.filePath("scrcpy"));
     // Scrcpy and Adb must not disagree about which adb is in use.
@@ -302,9 +274,10 @@ void TstScrcpy::anUnresolvableEnvironmentAdbIsIgnoredLikeAdbDoes()
 void TstScrcpy::explicitAdbAndEnvironmentBeatSiblingAdb()
 {
     QTemporaryDir pkg;
-    makePackageDir(pkg);
+    if (!makePackageDir(pkg))
+        QSKIP("TMPDIR does not allow executable files (noexec mount?)");
     QTemporaryDir emptyDir;
-    IsolatedAdbEnvironment isolated(emptyDir.path(), emptyDir.path());
+    IsolatedProgramEnvironment isolated(emptyDir.path(), emptyDir.path());
 
     Scrcpy scrcpy;
     scrcpy.setExecutable(pkg.filePath("scrcpy"));

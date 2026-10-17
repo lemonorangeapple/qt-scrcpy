@@ -4,7 +4,7 @@ add_test(NAME parsing COMMAND tst_parsing)
 
 # The process tests drive shell-script stand-ins for adb and scrcpy.
 if(UNIX)
-    foreach(name tst_adb tst_scrcpy tst_monitor tst_compat)
+    foreach(name tst_adb tst_scrcpy tst_monitor tst_compat tst_locate)
         add_executable(${name} ${name}.cpp)
         target_link_libraries(${name} PRIVATE qtscrcpy Qt6::Test)
         target_compile_definitions(${name} PRIVATE
@@ -32,7 +32,7 @@ if(_qtscrcpy_bundle_ready)
     if(UNIX AND NOT CMAKE_CROSSCOMPILING)
         add_test(NAME compat_bundled COMMAND tst_compat)
         set_tests_properties(compat_bundled PROPERTIES
-            ENVIRONMENT "SCRCPY_EXECUTABLE=${QTSCRCPY_BUNDLE_ROOT}/scrcpy")
+            ENVIRONMENT "SCRCPY_EXECUTABLE=${QTSCRCPY_BUNDLE_ROOT}/scrcpy;TST_COMPAT_REQUIRE_EXECUTABLE=${QTSCRCPY_BUNDLE_ROOT}/scrcpy")
     endif()
 endif()
 
@@ -45,6 +45,7 @@ if(UNIX)
             -DMODULE_DIR=${PROJECT_SOURCE_DIR}/cmake
             -DHARNESS_DIR=${CMAKE_CURRENT_SOURCE_DIR}/cmake/harness
             -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/bundle_module_work
+            -DQT_SCRCPY_DIR=${PROJECT_SOURCE_DIR} -DWITH_QT=ON
             -DPYTHON=${Python3_EXECUTABLE}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_bundle_module.cmake)
 endif()

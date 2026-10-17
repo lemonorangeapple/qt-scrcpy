@@ -123,7 +123,7 @@ QString Adb::findExecutable()
 
 bool Adb::isAvailable() const
 {
-    return !QStandardPaths::findExecutable(m_executable).isEmpty();
+    return !resolveExecutable(m_executable).isEmpty();
 }
 
 // ---- raw commands ------------------------------------------------------------
@@ -278,8 +278,28 @@ void Adb::startTracking()
     if (m_tracking)
         return;
     m_tracking = true;
-    spawnTracker();
-    refreshDevices();
+    const quint64 generation = ++m_trackingGeneration;
+
+    // The tracker and the first `devices -l` would both try to start a server that is not
+    // running yet, and with adb 36 one of them then fails ("failed to start daemon"): bring the
+    // server up first.
+    runAsync({QStringLiteral("start-server")}, [this, generation](const CommandResult &result) {
+        if (!m_tracking || generation != m_trackingGeneration)
+            return; // stopTracking() (and maybe a new startTracking()) happened meanwhile
+        if (result.error == CommandError::FailedToStart) {
+            // No adb binary: nothing to retry.
+            m_tracking = false;
+            emit errorOccurred(result.failureReason());
+            return;
+        }
+        if (!result.ok()) {
+            emit errorOccurred(result.failureReason());
+            m_restartTimer.start(); // try again; the tracker also starts a server by itself
+            return;
+        }
+        spawnTracker();
+        refreshDevices();
+    }, 30 * 1000);
 }
 
 void Adb::spawnTracker()
@@ -319,6 +339,7 @@ void Adb::onTrackerStopped(QProcess *tracker)
 void Adb::stopTracking()
 {
     m_tracking = false;
+    ++m_trackingGeneration;
     m_restartTimer.stop();
     m_debounceTimer.stop();
     if (QProcess *tracker = m_tracker) {
