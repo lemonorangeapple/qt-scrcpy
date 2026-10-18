@@ -12,9 +12,9 @@ jobs:
       - name: Install Qt 5
         run: |
           sudo apt-get update
-          sudo apt-get install -y qtbase5-dev cmake ninja-build g++ python3
+          sudo apt-get install -y qtbase5-dev cmake ninja-build g++ python3 libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DQTSCRCPY_BUNDLE_SCRCPY=OFF
+        run: cmake -S . -B build -G Ninja -DQTSCRCPY_BUNDLE_SCRCPY=OFF -DQTSCRCPY_FFMPEG_ROOT=/usr
       - name: Build
         run: cmake --build build
       - name: Test
@@ -37,8 +37,9 @@ jobs:
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-qt5-base
             mingw-w64-x86_64-qt5-tools
+            mingw-w64-x86_64-ffmpeg
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DQTSCRCPY_BUNDLE_SCRCPY=OFF -DCMAKE_PREFIX_PATH="$(cygpath -w "$MINGW_PREFIX")"
+        run: cmake -S . -B build -G Ninja -DQTSCRCPY_BUNDLE_SCRCPY=OFF -DQTSCRCPY_FFMPEG_ROOT="$(cygpath -m "$MINGW_PREFIX")" -DCMAKE_PREFIX_PATH="$(cygpath -w "$MINGW_PREFIX")"
       - name: Build
         run: cmake --build build
       - name: Test
