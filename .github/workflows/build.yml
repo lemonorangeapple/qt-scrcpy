@@ -36,6 +36,7 @@ jobs:
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-qt5-base
+            mingw-w64-x86_64-qt5-tools
       - name: Configure
         run: cmake -S . -B build -G Ninja -DQTSCRCPY_BUNDLE_SCRCPY=OFF -DCMAKE_PREFIX_PATH="$(cygpath -w "$MINGW_PREFIX")"
       - name: Build

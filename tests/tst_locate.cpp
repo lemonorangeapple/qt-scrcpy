@@ -1,10 +1,9 @@
-// Where Adb and Scrcpy look for their programs: $ADB / $SCRCPY_EXECUTABLE, Android SDK
+// Where Adb looks for its program: $ADB, Android SDK
 // directories, $PATH, and how a value with a directory part is read.
 #include "testenvironment.h"
 
 #include <qtscrcpy/adb.h>
 #include <qtscrcpy/locate.h>
-#include <qtscrcpy/scrcpy.h>
 
 #include <QDir>
 #include <QFileInfo>
@@ -26,8 +25,6 @@ private slots:
     void adb_androidSdkDirectories();
     void adb_defaultSdkDirectoryInHome();
     void adb_pathIsTheLastResort();
-    void scrcpy_environmentVariable();
-    void scrcpy_relativeEnvironmentValueIsAPath();
 
 private:
     // A directory holding the given executable files.
@@ -132,33 +129,6 @@ void TstLocate::adb_pathIsTheLastResort()
     }
     IsolatedProgramEnvironment isolated(emptyHome, emptyHome);
     QVERIFY2(Adb::findExecutable().isEmpty(), qPrintable(Adb::findExecutable()));
-}
-
-void TstLocate::scrcpy_environmentVariable()
-{
-    const QString chosen = dirWith({"my-scrcpy"});
-    const QString pathDir = dirWith({"scrcpy"});
-    IsolatedProgramEnvironment isolated(pathDir, pathDir);
-    {
-        ScopedEnvironmentVariable scrcpy("SCRCPY_EXECUTABLE", (chosen + "/my-scrcpy").toUtf8());
-        QCOMPARE(QFileInfo(Scrcpy::findExecutable()).canonicalFilePath(), QFileInfo(chosen + "/my-scrcpy").canonicalFilePath());
-    }
-    ScopedEnvironmentVariable scrcpy("SCRCPY_EXECUTABLE", "/nonexistent/scrcpy");
-    QCOMPARE(QFileInfo(Scrcpy::findExecutable()).canonicalFilePath(), QFileInfo(pathDir + "/scrcpy").canonicalFilePath());
-}
-
-void TstLocate::scrcpy_relativeEnvironmentValueIsAPath()
-{
-    // SCRCPY_EXECUTABLE=tools/scrcpy means "tools/scrcpy under the current directory", even though
-    // $PATH has another scrcpy.
-    const QString pathDir = dirWith({"scrcpy"});
-    const QString cwdDir = dirWith({"tools/scrcpy"});
-    IsolatedProgramEnvironment isolated(pathDir, pathDir);
-    ScopedEnvironmentVariable scrcpy("SCRCPY_EXECUTABLE", "tools/scrcpy");
-    const QString oldCwd = QDir::currentPath();
-    QVERIFY(QDir::setCurrent(cwdDir));
-    const auto restore = qScopeGuard([&] { QDir::setCurrent(oldCwd); });
-    QCOMPARE(QFileInfo(Scrcpy::findExecutable()).canonicalFilePath(), QFileInfo(cwdDir + "/tools/scrcpy").canonicalFilePath());
 }
 
 QTEST_GUILESS_MAIN(TstLocate)
