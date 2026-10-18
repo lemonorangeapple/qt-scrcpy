@@ -1,0 +1,6 @@
+{
+  "name": "libstreamer.so",
+  "types": "./index.d.ts",
+  "version": "1.0.0",
+  "description": "native H.264 streamer"
+}

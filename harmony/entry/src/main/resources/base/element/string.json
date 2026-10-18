@@ -1,0 +1,7 @@
+{
+  "string": [
+    { "name": "module_desc", "value": "把屏幕或摄像头画面推送给电脑" },
+    { "name": "app_name", "value": "qt-scrcpy 推流" },
+    { "name": "camera_reason", "value": "摄像头投屏需要使用相机" }
+  ]
+}

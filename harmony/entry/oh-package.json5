@@ -1,0 +1,11 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "qt-scrcpy streamer entry",
+  "main": "",
+  "author": "",
+  "license": "",
+  "dependencies": {
+    "libstreamer.so": "file:./src/main/cpp/types/libstreamer"
+  }
+}
