@@ -89,6 +89,7 @@ private:
 
     bool m_refreshing = false;
     int m_failures = 0;
+    bool m_retryTimedOutRefresh = false; // the last device-list read timed out: keep asking even when idle
     int m_serverRescues = 0; // how often the hung server was kicked; capped, so this cannot loop
     bool m_refreshQueued = false;
 

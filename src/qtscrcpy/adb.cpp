@@ -52,7 +52,7 @@ Adb::Adb(const QString &executable, QObject *parent)
     // out would show no devices until the tracker happens to report a change.
     m_refreshRetryTimer.setSingleShot(true);
     connect(&m_refreshRetryTimer, &QTimer::timeout, this, [this] {
-        if (m_tracking || !m_devices.isEmpty())
+        if (m_tracking || m_retryTimedOutRefresh || !m_devices.isEmpty())
             refreshDevices();
     });
 
@@ -216,6 +216,7 @@ void Adb::refreshDevices()
         if (result.error == CommandError::TimedOut) {
             // A cold adb server can take a while: keep asking, quietly, before saying anything.
             ++m_failures;
+            m_retryTimedOutRefresh = true;
             // Back off a little each time (2 s, 4 s, ... up to 10 s) so a busy machine is not hammered.
             m_refreshRetryTimer.start(qMin(2 * kTrackerRestartDelayMs * m_failures, 10 * 1000));
             if (m_failures == kFailuresBeforeAdvice) {
@@ -228,6 +229,7 @@ void Adb::refreshDevices()
         }
         if (result.ok()) {
             m_failures = 0;
+            m_retryTimedOutRefresh = false;
             m_refreshRetryTimer.stop();
         }
         if (result.ok()) {
@@ -357,6 +359,7 @@ void Adb::stopTracking()
     ++m_trackingGeneration;
     m_restartTimer.stop();
     m_refreshRetryTimer.stop();
+    m_retryTimedOutRefresh = false;
     m_debounceTimer.stop();
     if (QProcess *tracker = m_tracker) {
         m_tracker = nullptr;
