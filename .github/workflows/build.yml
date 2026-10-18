@@ -20,7 +20,7 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  windows-x86-qt5:
+  windows-x64-qt5:
     runs-on: windows-latest
     defaults:
       run:
@@ -29,13 +29,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW32
+          msystem: MINGW64
           update: true
           install: >-
-            mingw-w64-i686-gcc
-            mingw-w64-i686-cmake
-            mingw-w64-i686-ninja
-            mingw-w64-i686-qt5-base
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-qt5-base
       - name: Configure
         run: cmake -S . -B build -G Ninja -DQTSCRCPY_BUNDLE_SCRCPY=OFF -DCMAKE_PREFIX_PATH="$(cygpath -w "$MINGW_PREFIX")"
       - name: Build
