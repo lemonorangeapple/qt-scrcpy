@@ -1,9 +1,9 @@
 # A project that uses qt-scrcpy as a subproject, the way the README describes; driven by
-# test_bundle_module.cmake (needs Qt6, like qt-scrcpy itself).
+# test_bundle_module.cmake (needs Qt5, like qt-scrcpy itself).
 cmake_minimum_required(VERSION 3.16)
 project(consumer CXX)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Core Widgets)
+find_package(Qt5 5.14 REQUIRED COMPONENTS Core Widgets)
 
 set(QTSCRCPY_BUNDLE_SCRCPY ON) # the documented way to ask for bundling as a subproject
 add_subdirectory("${QT_SCRCPY_DIR}" qt-scrcpy)

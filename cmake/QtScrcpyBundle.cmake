@@ -325,8 +325,10 @@ function(_qtscrcpy_unpack archive expected platform extract_dir with_adb)
     endif()
 
     _qtscrcpy_exe_suffix("${platform}" suffix)
-    # If scrcpy ever changes its package layout, fail now and not at run time.
-    set(wanted "scrcpy${suffix}" "scrcpy-server")
+    # The scrcpy client is built into qtscrcpy itself (ScrcpyStream), so only what runs on or talks to
+    # the phone is taken from the package: the server file that is pushed to the phone, and adb. If
+    # scrcpy ever changes its package layout, fail now and not at run time.
+    set(wanted "scrcpy-server")
     if(with_adb)
         list(APPEND wanted "adb${suffix}")
     endif()
@@ -336,16 +338,13 @@ function(_qtscrcpy_unpack archive expected platform extract_dir with_adb)
             message(FATAL_ERROR "qt-scrcpy: '${required}' is missing from ${archive} (or is not a file).")
         endif()
     endforeach()
-    if(EXISTS "${package_root}/icon.png")
-        list(APPEND wanted "icon.png") # scrcpy's window icon
-    endif()
-    if(suffix STREQUAL ".exe")
-        _qtscrcpy_glob_escape("${package_root}" package_root_glob)
-        file(GLOB dlls RELATIVE "${package_root}" "${package_root_glob}/*.dll")
-        if(NOT with_adb)
-            list(FILTER dlls EXCLUDE REGEX "^AdbWin(Usb)?Api\\.dll$") # adb.exe's own libraries
-        endif()
-        list(APPEND wanted ${dlls})
+    if(suffix STREQUAL ".exe" AND with_adb)
+        # adb.exe's own libraries; scrcpy's SDL2, FFmpeg and libusb are not needed.
+        foreach(dll AdbWinApi.dll AdbWinUsbApi.dll)
+            if(EXISTS "${package_root}/${dll}")
+                list(APPEND wanted "${dll}")
+            endif()
+        endforeach()
     endif()
 
     # Only what the programs need (no man page, no .bat/.vbs helpers); file(COPY) keeps the
@@ -668,7 +667,8 @@ function(qtscrcpy_bundle_runtime target)
     # The scrcpy packages carry no licence files, so the notices travel with them (once).
     get_property(notices_done GLOBAL PROPERTY QTSCRCPY_NOTICES_INSTALLED)
     if(NOT notices_done)
-        install(FILES "${module_dir}/../THIRD_PARTY_NOTICES.md" DESTINATION "${CMAKE_INSTALL_DOCDIR}")
+        install(FILES "${module_dir}/../THIRD_PARTY_NOTICES.md" "${module_dir}/../LICENSE"
+                DESTINATION "${CMAKE_INSTALL_DOCDIR}")
         install(DIRECTORY "${module_dir}/../licenses" DESTINATION "${CMAKE_INSTALL_DOCDIR}")
         set_property(GLOBAL PROPERTY QTSCRCPY_NOTICES_INSTALLED TRUE)
     endif()

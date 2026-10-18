@@ -1,5 +1,7 @@
 #include "commandrunner.h"
 
+#include "processtweaks.h"
+
 namespace QtScrcpy {
 
 CommandResult CommandRunner::runSync(const QString &program,
@@ -10,6 +12,7 @@ CommandResult CommandRunner::runSync(const QString &program,
     CommandResult result;
 
     QProcess process;
+    detail::suppressConsoleWindow(process);
     if (!environment.isEmpty())
         process.setProcessEnvironment(environment);
     process.start(program, arguments);
@@ -41,6 +44,7 @@ CommandResult CommandRunner::runSync(const QString &program,
 CommandRunner::CommandRunner(QObject *parent)
     : QObject(parent)
 {
+    detail::suppressConsoleWindow(m_process);
     m_timer.setSingleShot(true);
 
     connect(&m_process, &QProcess::readyReadStandardOutput, this, [this] {
@@ -49,7 +53,9 @@ CommandRunner::CommandRunner(QObject *parent)
     connect(&m_process, &QProcess::readyReadStandardError, this, [this] {
         m_result.standardError += m_process.readAllStandardError();
     });
-    connect(&m_process, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus status) {
+    // QProcess::finished is overloaded in Qt 5: pick the (exitCode, status) version explicitly.
+    connect(&m_process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this](int exitCode, QProcess::ExitStatus status) {
         m_result.exitCode = exitCode;
         if (status == QProcess::CrashExit)
             finish(CommandError::Crashed, m_process.errorString());
@@ -109,8 +115,11 @@ void CommandRunner::finish(CommandError error, const QString &message)
     if (error != CommandError::None && error != CommandError::Crashed)
         m_result.exitCode = -1;
 
-    emit finished(m_result);
+    // Schedule the deletion first: a slot may delete the owner of this runner (the Adb object),
+    // which destroys this object as a child. Emitting first would then call deleteLater() on a
+    // destroyed object.
     deleteLater();
+    emit finished(m_result);
 }
 
 } // namespace QtScrcpy

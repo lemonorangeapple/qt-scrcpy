@@ -2,3 +2,13 @@ build*/
 .cache/
 CMakeUserPresets.json
 *.user
+harmony/.hvigor/
+harmony/**/oh_modules/
+qtscrcpy-harmony-unsigned.hap
+harmony/entry/.cxx/
+harmony/entry/build/
+harmony/build/
+harmony/**/.hvigor/
+harmony/**/oh_modules/
+harmony/**/oh-package-lock.json5
+harmony/local.properties

@@ -1,10 +1,10 @@
-// Runs next to the scrcpy/adb package that the build copies beside this executable and
-// checks that the library finds and can use those copies, i.e. that an application built
-// this way works on a machine without scrcpy and adb installed.
+// Runs next to the adb + scrcpy-server files that the build copies beside this executable and
+// checks that the library finds and can use them, i.e. that an application built this way works on a
+// machine without adb installed.
 #include "testenvironment.h"
 
 #include <qtscrcpy/adb.h>
-#include <qtscrcpy/scrcpy.h>
+#include <qtscrcpy/scrcpystream.h>
 
 #include <QCoreApplication>
 #include <QDir>
@@ -24,8 +24,7 @@ private slots:
     void cleanupTestCase();
     void packageIsNextToTheExecutable();
     void adbIsFoundAndRuns();
-    void scrcpyIsFoundAndRuns();
-    void scrcpyHandsTheBundledAdbToScrcpy();
+    void serverJarIsFound();
 
 private:
     std::unique_ptr<QTemporaryDir> m_decoys;
@@ -50,8 +49,7 @@ void TstBundled::initTestCase()
     // the machine may have no adb or scrcpy on $PATH at all, which would make "found next to the
     // program rather than on $PATH" untestable: put decoys first on $PATH.
     m_decoys = std::make_unique<QTemporaryDir>();
-    const bool decoysOk = makeExecutableFile(m_decoys->filePath(exe("adb")))
-                          && makeExecutableFile(m_decoys->filePath(exe("scrcpy")));
+    const bool decoysOk = makeExecutableFile(m_decoys->filePath(exe("adb")));
     m_environment = std::make_unique<IsolatedProgramEnvironment>(
         m_decoys->path() + QDir::listSeparator() + QString::fromLocal8Bit(qgetenv("PATH")), m_decoys->path());
     if (!decoysOk)
@@ -67,18 +65,16 @@ void TstBundled::cleanupTestCase()
 
 void TstBundled::packageIsNextToTheExecutable()
 {
-    QStringList programs{exe("scrcpy")};
 #if BUNDLED_ADB
-    programs << exe("adb");
+    QVERIFY2(QFileInfo::exists(inAppDir(exe("adb"))), qPrintable(exe("adb") + " missing in " + QCoreApplication::applicationDirPath()));
+    QVERIFY2(QFileInfo(inAppDir(exe("adb"))).isExecutable(), "adb is not executable");
 #else
     QVERIFY2(!QFileInfo::exists(inAppDir(exe("adb"))), "adb must not be bundled with QTSCRCPY_BUNDLE_ADB=OFF");
 #endif
-    for (const QString &name : programs) {
-        QVERIFY2(QFileInfo::exists(inAppDir(name)), qPrintable(name + " missing in " + QCoreApplication::applicationDirPath()));
-        QVERIFY2(QFileInfo(inAppDir(name)).isExecutable(), qPrintable(name + " is not executable"));
-    }
-    // scrcpy pushes this file to the phone; it is looked up next to the scrcpy binary.
+    // The scrcpy client is inside the library: no scrcpy program is shipped, only the server file that is
+    // pushed to the phone.
     QVERIFY(QFileInfo::exists(inAppDir("scrcpy-server")));
+    QVERIFY2(!QFileInfo::exists(inAppDir(exe("scrcpy"))), "scrcpy must not be bundled: the client is built in");
 }
 
 void TstBundled::adbIsFoundAndRuns()
@@ -99,35 +95,14 @@ void TstBundled::adbIsFoundAndRuns()
     qInfo() << "bundled adb" << version;
 }
 
-void TstBundled::scrcpyIsFoundAndRuns()
+void TstBundled::serverJarIsFound()
 {
-    QCOMPARE(canonical(Scrcpy::findExecutable()), canonical(inAppDir(exe("scrcpy"))));
-    if (m_decoysWork)
-        QVERIFY(canonical(Scrcpy::findExecutable()) != canonical(m_decoys->filePath(exe("scrcpy"))));
-
-    Scrcpy scrcpy;
-    QVERIFY(scrcpy.isAvailable());
-    const ScrcpyVersion version = scrcpy.version();
-    QVERIFY2(version.isValid(), "the bundled scrcpy did not run");
-    QCOMPARE(version, ScrcpyVersion::parse(QStringLiteral("scrcpy " EXPECTED_SCRCPY_VERSION)));
-}
-
-void TstBundled::scrcpyHandsTheBundledAdbToScrcpy()
-{
-    // The package's scrcpy would otherwise look adb up in $PATH, where the bundled one is not.
-    Scrcpy scrcpy;
-#if !BUNDLED_ADB
-    // No adb beside scrcpy: it is handed the one the library itself would use (here the decoy on $PATH).
-    QCOMPARE(scrcpy.effectiveAdbExecutable(), Adb::findExecutable());
-    if (m_decoysWork)
-        QVERIFY(!scrcpy.effectiveAdbExecutable().isEmpty());
-#elif defined(Q_OS_WIN)
-    // scrcpy.exe finds the adb.exe in its own directory by itself (and cannot take a path with
-    // spaces in $ADB), so nothing is exported.
-    QCOMPARE(scrcpy.effectiveAdbExecutable(), QString());
-#else
-    QCOMPARE(canonical(scrcpy.effectiveAdbExecutable()), canonical(inAppDir(exe("adb"))));
-#endif
+    QCOMPARE(canonical(ScrcpyStream::findServerJar()), canonical(inAppDir("scrcpy-server")));
+    QFile jar(inAppDir("scrcpy-server"));
+    QVERIFY(jar.open(QIODevice::ReadOnly));
+    QCOMPARE(jar.read(2), QByteArray("PK")); // a jar is a zip file
+    // The server refuses a client of another version: the bundled release must be the one this client speaks.
+    QCOMPARE(QString::fromLatin1(ScrcpyStream::kBundledServerVersion), QStringLiteral(EXPECTED_SCRCPY_VERSION));
 }
 
 QTEST_GUILESS_MAIN(TstBundled)

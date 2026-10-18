@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(qt-scrcpy VERSION 0.1.0 LANGUAGES CXX)
+project(qt-scrcpy VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,17 +36,17 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(QtScrcpyBundle)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Core)
+find_package(Qt5 5.14 REQUIRED COMPONENTS Core Network)
 
 add_subdirectory(src)
 
 if(QTSCRCPY_BUILD_EXAMPLES)
-    find_package(Qt6 6.2 REQUIRED COMPONENTS Widgets)
+    find_package(Qt5 5.14 REQUIRED COMPONENTS Widgets)
     add_subdirectory(examples/gui)
 endif()
 
 if(QTSCRCPY_BUILD_TESTS)
-    find_package(Qt6 6.2 REQUIRED COMPONENTS Test)
+    find_package(Qt5 5.14 REQUIRED COMPONENTS Test)
     enable_testing()
     add_subdirectory(tests)
 endif()

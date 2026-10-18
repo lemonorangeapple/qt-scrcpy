@@ -57,4 +57,5 @@ struct QTSCRCPY_EXPORT AdbDevice
 } // namespace QtScrcpy
 
 Q_DECLARE_METATYPE(QtScrcpy::AdbDevice)
+Q_DECLARE_METATYPE(QtScrcpy::AdbDevice::State)
 Q_DECLARE_METATYPE(QList<QtScrcpy::AdbDevice>)

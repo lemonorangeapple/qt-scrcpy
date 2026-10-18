@@ -1,5 +1,7 @@
 # 第三方声明
 
+本仓库自己的代码使用 MIT 许可证(见 [LICENSE](LICENSE));本文件只涉及随构建产物分发的第三方组件。
+
 本仓库**不包含** scrcpy 或 adb 的任何二进制文件。
 
 启用 `QTSCRCPY_BUNDLE_SCRCPY`(顶层构建默认 `AUTO`)后,CMake 会在**构建这台机器上**从 scrcpy 官方发布页下载发布包,用固定的 SHA-256 校验,再复制到程序旁边(见 `cmake/QtScrcpyBundle.cmake`)。这样构建出来的程序、以及 `cmake --install` 的安装目录里**含有**下面这些第三方组件。把它们分发给别人时,下面的许可证条款就适用于分发者。
@@ -7,6 +9,8 @@
 > 本文件整理的是调查时读到的事实,**不是法律意见**。标了「未确认」的地方是没能查证的,不要当成结论。不想分发 adb 的话,用 `-DQTSCRCPY_BUNDLE_ADB=OFF` 构建(只带 scrcpy,使用者自己安装 platform-tools),或用 `-DQTSCRCPY_BUNDLE_SCRCPY=OFF`(都不带)。用 `QTSCRCPY_BUNDLE_ADB=OFF` 构建时,下面「adb」一节以及 Windows 上的 `AdbWinApi.dll`、`AdbWinUsbApi.dll` 不适用,其余部分仍然适用。
 
 **这份声明随 `cmake --install` 一起安装(`share/doc/…/`),但只有安装才会带上它。** 直接拷贝构建目录、或用 `NO_INSTALL` 的目标,拿到的只有二进制,没有任何声明或许可证文本;分发前需要自己补上。
+
+> **重要(与旧版本的区别):** 现在的构建只从 scrcpy 官方包里取 `scrcpy-server` 和 `adb`(Windows 还有 `AdbWinApi.dll`、`AdbWinUsbApi.dll`),**不再分发** `scrcpy.exe`、SDL2、libusb、dav1d 以及 scrcpy 自带的那套 FFmpeg。下文「随安装附带的许可证文本」「编译进 scrcpy 客户端的库」里关于这些库的内容,只在你直接分发 scrcpy 官方包时才适用,对本项目的发布包不适用。本项目自己分发的视频解码库见文末「FFmpeg」一节(自编译精简版)。
 
 调查对象是 scrcpy v3.3.3 的官方发布包(读取的是 scrcpy 仓库该标签下的构建脚本和文档):
 
@@ -74,3 +78,68 @@
 - 各库源码:FFmpeg <https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz>,libusb <https://github.com/libusb/libusb/archive/refs/tags/v1.0.29.tar.gz>,SDL <https://github.com/libsdl-org/SDL/releases/tag/release-2.32.8>,dav1d <https://code.videolan.org/videolan/dav1d/-/archive/1.5.0/dav1d-1.5.0.tar.gz>。完整构建方法在 scrcpy 仓库该标签下的 `app/deps/*.sh` 和 `release/build_*.sh`。
 - LGPL 部分(FFmpeg、libusb)在 Linux、macOS 上是静态链接、在 Windows 上是独立 DLL,这会影响使用者替换它们的方式。分发时需要满足的具体义务(例如提供源码或书面承诺)没有在这里替你梳理。
 - Linux 版 scrcpy 运行时还需要使用者系统自带的 libc(发布包里最高要求 glibc 2.35)、libm 和 `libudev.so.1`;随包的 adb 另需 libgcc_s.so.1 等;这些都不在发布包里。
+
+
+## FFmpeg（电脑端 H.264 解码：安卓和鸿蒙设备都用）
+
+发布包里的 `avcodec-61.dll`、`avutil-59.dll`、`swscale-8.dll`。本程序只使用其中的 **H.264 解码器**和像素格式转换，通过动态链接调用，用户可以自行替换这些 DLL（保持同一主版本）。
+
+- **这是本项目自己编译的精简版 FFmpeg 7.1.1**，不是第三方预编译包：只启用了 `h264`、`hevc`、`mjpeg`（系统截图是 JPEG，降级投屏要用）三个解码器和 h264/hevc 解析器，没有任何编码器、封装/解复用、滤镜、网络协议和外部库。
+- 配置命令（32 位把 `--arch=x86_64` 换成 `--arch=x86`，并用 32 位 MinGW）：
+
+  ```
+  ./configure --arch=x86_64 --target-os=mingw32 --enable-shared --disable-static --disable-programs --disable-doc
+    --disable-avdevice --disable-avformat --disable-avfilter --disable-swresample --disable-network
+    --disable-everything --enable-decoder=h264,hevc,mjpeg --enable-parser=h264,hevc --disable-debug --enable-small
+    --disable-autodetect --disable-iconv --disable-d3d11va --disable-dxva2 --disable-hwaccels
+    --enable-swscale --disable-postproc
+  ```
+- 许可证：configure 输出 **LGPL 2.1 或更高**（没有 `--enable-gpl`、`--enable-nonfree`、`--enable-version3`，也没有链接任何第三方库）。许可证文本：`licenses/ffmpeg-COPYING.LGPLv2.1`。
+- 源码：<https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz>（SHA-256 请自行核对官方发布页）。分发这些 DLL 的人需要能向接收者提供对应源码；上面的配置命令加官方源码即可重建。
+- 本项目**没有修改** FFmpeg 源码。
+- 本文件整理的是事实，**不是法律意见**。
+
+## scrcpy 客户端协议（内置在 qtscrcpy.dll）
+
+库里的 `ScrcpyStream` 是按 scrcpy v3.3.3 的公开客户端协议（`app/src/server.c`、`demuxer.c` 与服务端 `Options.java` / `Streamer.java`）**重新实现**的最小客户端，没有复制 scrcpy 客户端的源码；只用来和随包的 `scrcpy-server` 通信。`scrcpy-server` 本身仍是 scrcpy 项目的 Apache-2.0 文件，见上文。发布包**不再包含** `scrcpy.exe`、SDL2、scrcpy 自带的 FFmpeg（`avcodec-61` 那一套）和 libusb，上文里关于它们的条目对本发布包不适用（仍然适用于直接使用 scrcpy 官方包的情况）。
+
+## HarmonyOS 签名材料（signing/）
+
+为了让程序能按连接到的设备自动签名安装配套应用，发布包里带了 OpenHarmony SDK 的调试签名材料：
+
+| 文件 | 来源 | 说明 |
+| ---- | ---- | ---- |
+| `hap-sign-tool.jar` | OpenHarmony `developtools_hapsigner`（Apache-2.0） | 签名工具，运行时由 Java 执行 |
+| `UnsgnedDebugProfileTemplate.json` | OpenHarmony SDK `toolchains/lib` | 调试 profile 模板（含 OpenHarmony 调试应用证书） |
+| `OpenHarmony.p12` | 同上 | 口令 `123456`，公开的 OpenHarmony 调试密钥库 |
+| `OpenHarmonyProfileDebug.pem` | 同上 | profile 签名证书链 |
+| `app-cert-chain.pem` | 由上面的模板和证书拼成 | 应用证书链（应用证书 + CA + 根） |
+
+这些是 OpenHarmony 公开发布的调试凭据，**不是**任何个人或华为账号的凭证；用它们签出来的应用只有信任 OpenHarmony 调试根证书的设备会安装。
+本项目不修改这些文件；重新分发时请保留其原始许可证（Apache-2.0，见 `licenses/`）。
+
+## 配套应用里的软件编码器（harmony/）
+
+手机没有可用的硬件视频编码器时，配套应用改用内置的软件编码，依次尝试 H.264 和逐帧 JPEG：
+
+| 组件 | 版本 | 许可证 | 用途 |
+| ---- | ---- | ------ | ---- |
+| OpenH264（Cisco） | v2.6.0 | BSD-2-Clause，见 `licenses/openh264-LICENSE.txt` | 软件 H.264 编码，只编译可移植的 C++ 代码，不含汇编 |
+| stb_image_write（Sean Barrett） | master | MIT 或公有领域二选一，见 `licenses/stb-LICENSE.txt` | 逐帧 JPEG 编码 |
+
+- OpenH264 是**从源码自行编译**进配套应用的，没有使用 Cisco 发布的二进制。Cisco 为其官方二进制承担 H.264 专利许可费，**自行编译的版本不享受这项专利授权**；分发含 H.264 编码的构建前，请自行评估所在地区的专利义务。本项目不修改 OpenH264 源码。
+- OpenH264 源码不随仓库分发：构建时用环境变量 `QTSCRCPY_OPENH264_DIR` 指向源码目录，没有时只编译 JPEG 兜底。stb 的头文件随仓库放在 `harmony/entry/src/main/cpp/third_party/stb/`。
+- 本文件整理的是事实，**不是法律意见**。
+
+## hdc（HarmonyOS Device Connector）
+
+发布包里带了 `hdc.exe` 和 `libusb_shared.dll`，用来连接鸿蒙设备。它们取自 OpenHarmony SDK 的 `toolchains/`（本仓库构建时放在 `build/deps/hdc/`），与本机 DevEco Studio 里的文件逐字节相同。
+
+| 文件 | 来源 | 许可证 |
+| ---- | ---- | ------ |
+| `hdc.exe` | OpenHarmony `developtools_hdc` | Apache-2.0，SDK 的 NOTICE 摘录见 `licenses/hdc-NOTICE.txt` |
+| `libusb_shared.dll` | libusb 1.0.28（OpenHarmony 的构建） | LGPL-2.1，文本见 `licenses/libusb-COPYING-LGPL-2.1.txt` |
+
+- `libusb_shared.dll` 是 LGPL 的动态库，随包分发时与程序分开，用户可以自行替换；分发的人需要能提供对应源码（libusb 官方源码即可，但 OpenHarmony 的构建可能带有自己的补丁，本项目没有核对）。
+- 本项目不修改这两个文件。hdc 的许可证归属我是按 SDK 自带的 NOTICE 文件核对的，**不是法律意见**。
+

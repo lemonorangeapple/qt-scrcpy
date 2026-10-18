@@ -18,21 +18,13 @@ private slots:
     void failureIsReported();
     void version();
     void devices();
-    void connectAndPair();
-    void deviceInfo();
-    void androidSdkVersion();
-    void packages();
-    void install();
-    void screenshot();
-    void inputTextQuoting();
     void runAsync();
-    void asyncVariantsMatchBlockingOnes();
     void refreshEmitsOnlyOnChange();
     void tracking();
     void trackingStartsTheServerBeforeTheTracker();
     void stoppingBeforeTheServerIsUpCancelsTracking();
     void trackingWithoutAdbReportsError();
-    void killServerStopsTracking();
+    void slowDeviceListIsRetriedQuietly();
 
 private:
     QString logContents() const;
@@ -101,7 +93,7 @@ void TstAdb::timeout()
 void TstAdb::failureIsReported()
 {
     qputenv("FAKE_ADB_FAIL", "1");
-    const CommandResult result = m_adb->shell("SER", "ls");
+    const CommandResult result = m_adb->run({"devices"});
     QVERIFY(!result.ok());
     QCOMPARE(result.exitCode, 1);
     QCOMPARE(result.failureReason(), QStringLiteral("error: no devices/emulators found"));
@@ -122,100 +114,6 @@ void TstAdb::devices()
     QCOMPARE(devices[0].serial, QStringLiteral("0123456789ABCDEF"));
     QCOMPARE(devices[1].serial, QStringLiteral("192.168.1.23:5555"));
     QVERIFY(devices[1].isNetwork());
-}
-
-void TstAdb::connectAndPair()
-{
-    CommandResult result = m_adb->connectDevice("192.168.1.50:5555");
-    QVERIFY(result.ok());
-    QCOMPARE(result.text(), QStringLiteral("connected to 192.168.1.50:5555"));
-
-    // adb exits 0 even when the connection fails; ok() must still be false.
-    result = m_adb->connectDevice("bad-host:5555");
-    QVERIFY(!result.ok());
-    QVERIFY2(result.failureReason().contains("failed to connect"), qPrintable(result.failureReason()));
-
-    QVERIFY(m_adb->pair("192.168.1.50:37000", "123456").ok());
-    result = m_adb->pair("192.168.1.50:37000", "000000");
-    QVERIFY(!result.ok());
-    QVERIFY(result.failureReason().contains("Wrong password"));
-
-    QVERIFY(m_adb->disconnectDevice("192.168.1.50:5555").ok());
-}
-
-void TstAdb::deviceInfo()
-{
-    QCOMPARE(m_adb->deviceIpAddress("SER"), QStringLiteral("192.168.1.23"));
-    QCOMPARE(m_adb->getProp("SER", "ro.product.model"), QStringLiteral("Fake Phone"));
-
-    const QMap<QString, QString> props = m_adb->properties("SER");
-    QCOMPARE(props.size(), 2);
-    QCOMPARE(props.value("ro.product.model"), QStringLiteral("Fake Phone"));
-    QCOMPARE(props.value("ro.build.version.release"), QStringLiteral("14")); // CR stripped
-}
-
-void TstAdb::androidSdkVersion()
-{
-    QCOMPARE(m_adb->androidSdkVersion("SER"), 34);
-
-    qputenv("FAKE_ADB_SDK", "30");
-    QCOMPARE(m_adb->androidSdkVersion("SER"), 30);
-
-    int async = -1;
-    m_adb->androidSdkVersionAsync("SER", [&async](int sdk) { async = sdk; });
-    QTRY_COMPARE(async, 30);
-    qunsetenv("FAKE_ADB_SDK");
-
-    // Unreadable -> 0, so callers can tell "unknown" from a real level.
-    qputenv("FAKE_ADB_FAIL", "1");
-    QCOMPARE(m_adb->androidSdkVersion("SER"), 0);
-    async = -1;
-    m_adb->androidSdkVersionAsync("SER", [&async](int sdk) { async = sdk; });
-    QTRY_COMPARE(async, 0);
-}
-
-void TstAdb::packages()
-{
-    CommandResult result;
-    const QStringList packages = m_adb->packages("SER", Adb::PackageFilter::ThirdParty, &result);
-    QVERIFY(result.ok());
-    QCOMPARE(packages, (QStringList{"com.a.app", "com.b.app"}));
-    QVERIFY(logContents().contains("pm list packages -3"));
-}
-
-void TstAdb::install()
-{
-    CommandResult result = m_adb->install("SER", "/tmp/good.apk");
-    QVERIFY(result.ok());
-    QVERIFY(logContents().contains("-s\tSER\tinstall\t-r\t/tmp/good.apk"));
-
-    // adb install may print Failure while still exiting 0.
-    result = m_adb->install("SER", "/tmp/bad.apk");
-    QVERIFY(!result.ok());
-    QVERIFY(result.failureReason().contains("INSTALL_FAILED_INVALID_APK"));
-}
-
-void TstAdb::screenshot()
-{
-    CommandResult result;
-    const QByteArray png = m_adb->screenshot("SER", &result);
-    QVERIFY(result.ok());
-    QVERIFY(png.startsWith("\x89PNG\r\n\x1a\n")); // binary stream must arrive untouched
-    QVERIFY(png.endsWith("FAKEDATA"));
-}
-
-void TstAdb::inputTextQuoting()
-{
-    QVERIFY(m_adb->inputText("SER", "hello it's; $(reboot)").ok());
-    QVERIFY(logContents().contains(
-        QStringLiteral("-s\tSER\tshell\tinput text 'hello%sit'\\''s;%s$(reboot)'\t")));
-
-    QVERIFY(m_adb->keyEvent("SER", Adb::Key::Home).ok());
-    QVERIFY(logContents().contains("shell\tinput keyevent 3\t"));
-    QVERIFY(m_adb->tap("SER", 10, 20).ok());
-    QVERIFY(logContents().contains("shell\tinput tap 10 20\t"));
-    QVERIFY(m_adb->swipe("SER", 1, 2, 3, 4, 500).ok());
-    QVERIFY(logContents().contains("shell\tinput swipe 1 2 3 4 500\t"));
 }
 
 void TstAdb::runAsync()
@@ -249,35 +147,6 @@ void TstAdb::runAsync()
     }, 200);
     QTRY_VERIFY_WITH_TIMEOUT(called, 5000);
     QCOMPARE(received.error, CommandError::TimedOut);
-}
-
-void TstAdb::asyncVariantsMatchBlockingOnes()
-{
-    CommandResult connectBad, connectGood, installBad, installGood, shell, shot;
-    int done = 0;
-    const auto into = [&done](CommandResult &target) {
-        return [&done, &target](const CommandResult &result) {
-            target = result;
-            ++done;
-        };
-    };
-
-    m_adb->connectDeviceAsync("bad-host:5555", into(connectBad));
-    m_adb->connectDeviceAsync("10.0.0.2:5555", into(connectGood));
-    m_adb->installAsync("SER", "/tmp/bad.apk", into(installBad));
-    m_adb->installAsync("SER", "/tmp/good.apk", into(installGood));
-    m_adb->shellAsync("SER", "echo hi", into(shell));
-    m_adb->screenshotAsync("SER", into(shot));
-    QTRY_COMPARE_WITH_TIMEOUT(done, 6, 5000);
-
-    // Same normalisation as the blocking calls: textual failures are failures.
-    QVERIFY(!connectBad.ok());
-    QVERIFY(connectGood.ok());
-    QVERIFY(!installBad.ok());
-    QVERIFY(installGood.ok());
-    QCOMPARE(shell.text(), QStringLiteral("shell:echo hi"));
-    QVERIFY(shot.ok());
-    QVERIFY(shot.standardOutput.startsWith("\x89PNG"));
 }
 
 void TstAdb::refreshEmitsOnlyOnChange()
@@ -368,13 +237,27 @@ void TstAdb::trackingWithoutAdbReportsError()
     QTRY_VERIFY(!broken.isTracking()); // gives up instead of retrying forever
 }
 
-void TstAdb::killServerStopsTracking()
+// A machine where starting the adb server is slow must not be shouted at: the read is retried quietly and
+// only a few failures in a row are reported.
+void TstAdb::slowDeviceListIsRetriedQuietly()
 {
-    m_adb->startTracking();
-    QVERIFY(m_adb->isTracking());
-    QVERIFY(m_adb->killServer().ok());
-    QVERIFY(!m_adb->isTracking());
-    QVERIFY(logContents().contains("kill-server"));
+    qputenv("FAKE_ADB_HANG_DEVICES", "5");              // each `devices -l` takes 5 s
+    qputenv("QTSCRCPY_ADB_TIMEOUT_MS", "300");          // while we only wait 300 ms
+    QSignalSpy errors(m_adb, &Adb::errorOccurred);
+    m_adb->refreshDevices();
+    QTest::qWait(1500);
+    // The first failures stay quiet, but the library keeps trying by itself.
+    QCOMPARE(errors.count(), 0);
+    const int calls = logContents().count(QStringLiteral("devices	-l"));
+    QVERIFY2(calls >= 2, qPrintable(QString::number(calls)));
+
+    // After enough failures it says so, once.
+    QTRY_VERIFY_WITH_TIMEOUT(errors.count() >= 1, 20000);
+    const QString message = errors.at(0).at(0).toString();
+    QVERIFY2(message.contains(QStringLiteral("超时")) || message.contains(QStringLiteral("timed out")),
+             qPrintable(message));
+    qunsetenv("FAKE_ADB_HANG_DEVICES");
+    qunsetenv("QTSCRCPY_ADB_TIMEOUT_MS");
 }
 
 QTEST_GUILESS_MAIN(TstAdb)

@@ -1,0 +1,44 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux-qt5:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qtbase5-dev cmake ninja-build g++ python3
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DQTSCRCPY_BUNDLE_SCRCPY=OFF
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows-x86-qt5:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          update: true
+          install: >-
+            mingw-w64-i686-gcc
+            mingw-w64-i686-cmake
+            mingw-w64-i686-ninja
+            mingw-w64-i686-qt5-base
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DQTSCRCPY_BUNDLE_SCRCPY=OFF -DCMAKE_PREFIX_PATH="$(cygpath -w "$MINGW_PREFIX")"
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

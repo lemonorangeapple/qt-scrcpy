@@ -19,7 +19,8 @@ QTSCRCPY_EXPORT QString resolveExecutable(const QString &program);
 //   3. `extraDirs`,
 //   4. $PATH.
 // Returns an empty string when nothing was found.
-QString locateExecutable(const QString &name, const QString &envVar, const QStringList &extraDirs = {});
+QTSCRCPY_EXPORT QString locateExecutable(const QString &name, const QString &envVar,
+                                         const QStringList &extraDirs = {});
 
 } // namespace QtScrcpy
 

@@ -2,78 +2,32 @@
 
 #include "commandrunner.h"
 #include "locate.h"
+#include "processtweaks.h"
 
 #include <QDir>
+#include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
-#include <QStandardPaths>
+
+#include <utility>
 
 namespace QtScrcpy {
 
 namespace {
 
 constexpr int kTrackerRestartDelayMs = 2000;
+// After this many timeouts in a row the message says what to do about it.
+constexpr int kFailuresBeforeAdvice = 3;
 constexpr int kTrackerDebounceMs = 100;
 
-// Some adb subcommands report failure only in their output. Turn that into a failed result.
-CommandResult requireOutput(CommandResult result, const QStringList &successMarkers)
-{
-    if (!result.ok())
-        return result;
-    const QString output = result.text();
-    for (const QString &marker : successMarkers) {
-        if (output.contains(marker, Qt::CaseInsensitive))
-            return result;
-    }
-    result.exitCode = 1;
-    result.errorMessage = output.isEmpty() ? QString::fromUtf8(result.standardError).trimmed() : output;
-    return result;
-}
-
-CommandResult rejectOnOutput(CommandResult result, const QStringList &failureMarkers)
-{
-    if (!result.ok())
-        return result;
-    const QString output = result.text();
-    for (const QString &marker : failureMarkers) {
-        if (output.contains(marker)) {
-            result.exitCode = 1;
-            result.errorMessage = output;
-            break;
-        }
-    }
-    return result;
-}
-
-QStringList connectArgs(const QString &address)
-{
-    return {QStringLiteral("connect"), address};
-}
-
-QStringList installArgs(const QString &apkPath, const QStringList &options)
-{
-    return QStringList{QStringLiteral("install")} + options + QStringList{apkPath};
-}
-
-QStringList screenshotArgs()
-{
-    return {QStringLiteral("exec-out"), QStringLiteral("screencap"), QStringLiteral("-p")};
-}
-
-CommandResult checkConnect(CommandResult result)
-{
-    return requireOutput(std::move(result), {QStringLiteral("connected to")}); // also "already connected to"
-}
-
-CommandResult checkInstall(CommandResult result)
-{
-    return rejectOnOutput(std::move(result), {QStringLiteral("Failure")});
-}
-
-constexpr int kConnectTimeoutMs = 10 * 1000;
-constexpr int kScreenshotTimeoutMs = 30 * 1000;
-
 } // namespace
+
+int Adb::timeoutFromEnvironment(const char *variable, int fallbackMs)
+{
+    bool ok = false;
+    const int value = qEnvironmentVariable(variable).toInt(&ok);
+    return ok && value > 0 ? value : fallbackMs;
+}
 
 Adb::Adb(QObject *parent)
     : Adb(findExecutable(), parent)
@@ -84,9 +38,23 @@ Adb::Adb(const QString &executable, QObject *parent)
     : QObject(parent)
     , m_executable(executable.isEmpty() ? QStringLiteral("adb") : executable)
 {
+    // Qt 5 does not register signal parameter types automatically: QSignalSpy (and queued
+    // connections) look them up by the names moc put in the meta-object.
+    qRegisterMetaType<AdbDevice>("QtScrcpy::AdbDevice");
+    qRegisterMetaType<AdbDevice::State>("QtScrcpy::AdbDevice::State");
+    qRegisterMetaType<QList<AdbDevice>>("QList<QtScrcpy::AdbDevice>");
+
     m_debounceTimer.setSingleShot(true);
     m_debounceTimer.setInterval(kTrackerDebounceMs);
     connect(&m_debounceTimer, &QTimer::timeout, this, &Adb::refreshDevices);
+
+    // A failed device-list read is retried by itself: without this, a machine where the first read times
+    // out would show no devices until the tracker happens to report a change.
+    m_refreshRetryTimer.setSingleShot(true);
+    connect(&m_refreshRetryTimer, &QTimer::timeout, this, [this] {
+        if (m_tracking || !m_devices.isEmpty())
+            refreshDevices();
+    });
 
     m_restartTimer.setSingleShot(true);
     m_restartTimer.setInterval(kTrackerRestartDelayMs);
@@ -140,11 +108,6 @@ CommandResult Adb::run(const QStringList &args, int timeoutMs) const
     return CommandRunner::runSync(m_executable, args, timeoutMs);
 }
 
-CommandResult Adb::runOnDevice(const QString &serial, const QStringList &args, int timeoutMs) const
-{
-    return run(deviceArgs(serial, args), timeoutMs);
-}
-
 void Adb::runAsync(const QStringList &args, Callback callback, int timeoutMs)
 {
     auto *runner = new CommandRunner(this);
@@ -155,8 +118,6 @@ void Adb::runAsync(const QStringList &args, Callback callback, int timeoutMs)
             });
     runner->start(m_executable, args, timeoutMs);
 }
-
-// ---- server -------------------------------------------------------------------
 
 QString Adb::version() const
 {
@@ -172,17 +133,6 @@ QString Adb::version() const
     if (!match.hasMatch())
         match = protocolVersion.match(text);
     return match.hasMatch() ? match.captured(1) : QString();
-}
-
-CommandResult Adb::startServer() const
-{
-    return run({QStringLiteral("start-server")}, 30 * 1000);
-}
-
-CommandResult Adb::killServer()
-{
-    stopTracking();
-    return run({QStringLiteral("kill-server")});
 }
 
 // ---- devices ------------------------------------------------------------------
@@ -242,7 +192,8 @@ QList<AdbDevice> Adb::parseDeviceList(const QString &output)
 
 QList<AdbDevice> Adb::devices(CommandResult *result) const
 {
-    const CommandResult r = run({QStringLiteral("devices"), QStringLiteral("-l")});
+    const CommandResult r = run({QStringLiteral("devices"), QStringLiteral("-l")},
+                                timeoutFromEnvironment("QTSCRCPY_ADB_TIMEOUT_MS", kDeviceListTimeoutMs));
     if (result)
         *result = r;
     return r.ok() ? parseDeviceList(r.text()) : QList<AdbDevice>();
@@ -255,21 +206,78 @@ void Adb::refreshDevices()
         return;
     }
     m_refreshing = true;
-    runAsync({QStringLiteral("devices"), QStringLiteral("-l")}, [this](const CommandResult &result) {
+    // A devicesChanged()/errorOccurred() handler may delete this Adb object. Keep the callback
+    // from touching members (or its own continuation) after that happened.
+    const QPointer<Adb> self(this);
+    runAsync({QStringLiteral("devices"), QStringLiteral("-l")}, [this, self](const CommandResult &result) {
+        if (!self)
+            return;
         m_refreshing = false;
+        if (result.error == CommandError::TimedOut) {
+            // A cold adb server can take a while: keep asking, quietly, before saying anything.
+            ++m_failures;
+            // Back off a little each time (2 s, 4 s, ... up to 10 s) so a busy machine is not hammered.
+            m_refreshRetryTimer.start(qMin(2 * kTrackerRestartDelayMs * m_failures, 10 * 1000));
+            if (m_failures == kFailuresBeforeAdvice) {
+                emit errorOccurred(tr("adb 响应超时（已重试 %1 次）。首次启动 adb 服务端、或杀毒软件拦截 adb.exe 时常见；"
+                                      "程序会继续重试。也可以在环境变量 QTSCRCPY_ADB_TIMEOUT_MS 里把超时改大（毫秒）。")
+                                       .arg(m_failures));
+                restartServerOnce();
+            }
+            return;
+        }
+        if (result.ok()) {
+            m_failures = 0;
+            m_refreshRetryTimer.stop();
+        }
         if (result.ok()) {
             const QList<AdbDevice> devices = parseDeviceList(result.text());
             if (devices != m_devices) {
                 m_devices = devices;
                 emit devicesChanged(m_devices);
+                if (!self)
+                    return;
             }
         } else {
-            emit errorOccurred(result.failureReason());
+            ++m_failures;
+            m_refreshRetryTimer.start(qMin(2 * kTrackerRestartDelayMs * m_failures, 10 * 1000));
+            if (m_failures <= kFailuresBeforeAdvice)
+                emit errorOccurred(result.failureReason());
+            else if (m_failures == kFailuresBeforeAdvice + 1)
+                restartServerOnce();
+            if (!self)
+                return;
         }
         if (m_refreshQueued) {
             m_refreshQueued = false;
             refreshDevices();
         }
+    }, timeoutFromEnvironment("QTSCRCPY_ADB_TIMEOUT_MS", kDeviceListTimeoutMs));
+}
+
+void Adb::restartServerOnce()
+{
+    // A server that stops answering (a stale one from another adb, a hung USB stack) is what
+    // `adb kill-server` fixes. Do it once: repeating it would fight with the user's other tools.
+    constexpr int kMaxRescues = 2;
+    if (m_serverRescues >= kMaxRescues) {
+        emit errorOccurred(tr("adb 一直不响应，已停止重启它。请手动运行 `adb kill-server`，"
+                              "或检查 adb 是否被安全软件拦截、是否与另一个版本的 adb 冲突。"));
+        return;
+    }
+    ++m_serverRescues;
+    emit errorOccurred(tr("adb 长时间没有响应，正在重启 adb 服务端（kill-server + start-server）…"));
+    const QPointer<Adb> self(this);
+    runAsync({QStringLiteral("kill-server")}, [this, self](const CommandResult &) {
+        if (!self)
+            return;
+        const bool wasTracking = m_tracking;
+        stopTracking();
+        m_failures = 0;
+        if (wasTracking)
+            startTracking();
+        else
+            refreshDevices();
     });
 }
 
@@ -277,14 +285,16 @@ void Adb::startTracking()
 {
     if (m_tracking)
         return;
+    // (the rescue counter is deliberately not reset: it caps the kill-server loop over the whole run)
     m_tracking = true;
     const quint64 generation = ++m_trackingGeneration;
 
     // The tracker and the first `devices -l` would both try to start a server that is not
     // running yet, and with adb 36 one of them then fails ("failed to start daemon"): bring the
     // server up first.
-    runAsync({QStringLiteral("start-server")}, [this, generation](const CommandResult &result) {
-        if (!m_tracking || generation != m_trackingGeneration)
+    const QPointer<Adb> self(this);
+    runAsync({QStringLiteral("start-server")}, [this, self, generation](const CommandResult &result) {
+        if (!self || !m_tracking || generation != m_trackingGeneration)
             return; // stopTracking() (and maybe a new startTracking()) happened meanwhile
         if (result.error == CommandError::FailedToStart) {
             // No adb binary: nothing to retry.
@@ -294,18 +304,21 @@ void Adb::startTracking()
         }
         if (!result.ok()) {
             emit errorOccurred(result.failureReason());
+            if (!self)
+                return;
             m_restartTimer.start(); // try again; the tracker also starts a server by itself
             return;
         }
         spawnTracker();
         refreshDevices();
-    }, 30 * 1000);
+    }, timeoutFromEnvironment("QTSCRCPY_ADB_TIMEOUT_MS", kServerStartTimeoutMs));
 }
 
 void Adb::spawnTracker()
 {
     auto *tracker = new QProcess(this);
     m_tracker = tracker;
+    detail::suppressConsoleWindow(*tracker);
 
     // The tracker's output format varies between adb versions, so any output only
     // acts as a "something changed" hint and the list is re-read with `devices -l`.
@@ -313,7 +326,9 @@ void Adb::spawnTracker()
         tracker->readAllStandardOutput();
         m_debounceTimer.start();
     });
-    connect(tracker, &QProcess::finished, this, [this, tracker] { onTrackerStopped(tracker); });
+    // QProcess::finished is overloaded in Qt 5: pick the (exitCode, status) version explicitly.
+    connect(tracker, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, tracker] { onTrackerStopped(tracker); });
     connect(tracker, &QProcess::errorOccurred, this, [this, tracker](QProcess::ProcessError error) {
         if (error != QProcess::FailedToStart)
             return;
@@ -341,6 +356,7 @@ void Adb::stopTracking()
     m_tracking = false;
     ++m_trackingGeneration;
     m_restartTimer.stop();
+    m_refreshRetryTimer.stop();
     m_debounceTimer.stop();
     if (QProcess *tracker = m_tracker) {
         m_tracker = nullptr;
@@ -349,287 +365,6 @@ void Adb::stopTracking()
         tracker->waitForFinished(1000);
         delete tracker;
     }
-}
-
-// ---- wireless -----------------------------------------------------------------
-
-CommandResult Adb::connectDevice(const QString &address) const
-{
-    return checkConnect(run(connectArgs(address), kConnectTimeoutMs));
-}
-
-CommandResult Adb::disconnectDevice(const QString &address) const
-{
-    QStringList args{QStringLiteral("disconnect")};
-    if (!address.isEmpty())
-        args << address;
-    return run(args);
-}
-
-CommandResult Adb::pair(const QString &hostPort, const QString &pairingCode) const
-{
-    return requireOutput(run({QStringLiteral("pair"), hostPort, pairingCode}, 20 * 1000),
-                         {QStringLiteral("Successfully paired")});
-}
-
-CommandResult Adb::tcpip(const QString &serial, int port) const
-{
-    return runOnDevice(serial, {QStringLiteral("tcpip"), QString::number(port)});
-}
-
-CommandResult Adb::usb(const QString &serial) const
-{
-    return runOnDevice(serial, {QStringLiteral("usb")});
-}
-
-QString Adb::deviceIpAddress(const QString &serial) const
-{
-    static const QRegularExpression addrInet(QStringLiteral(R"(inet (\d+\.\d+\.\d+\.\d+))"));
-    static const QRegularExpression routeSrc(QStringLiteral(R"(wlan\d+.*\bsrc (\d+\.\d+\.\d+\.\d+))"));
-
-    CommandResult result = shell(serial, QStringLiteral("ip -f inet addr show wlan0"));
-    if (result.ok()) {
-        const QRegularExpressionMatch match = addrInet.match(result.text());
-        if (match.hasMatch())
-            return match.captured(1);
-    }
-
-    result = shell(serial, QStringLiteral("ip route"));
-    if (result.ok()) {
-        const QRegularExpressionMatch match = routeSrc.match(result.text());
-        if (match.hasMatch())
-            return match.captured(1);
-    }
-    return {};
-}
-
-// ---- device interaction -------------------------------------------------------
-
-CommandResult Adb::shell(const QString &serial, const QString &command, int timeoutMs) const
-{
-    return runOnDevice(serial, {QStringLiteral("shell"), command}, timeoutMs);
-}
-
-QString Adb::getProp(const QString &serial, const QString &key) const
-{
-    const CommandResult result = runOnDevice(serial, {QStringLiteral("shell"), QStringLiteral("getprop"), key});
-    return result.ok() ? result.text() : QString();
-}
-
-int Adb::androidSdkVersion(const QString &serial) const
-{
-    return getProp(serial, QStringLiteral("ro.build.version.sdk")).toInt();
-}
-
-QMap<QString, QString> Adb::properties(const QString &serial, CommandResult *result) const
-{
-    static const QRegularExpression line(QStringLiteral(R"(^\[(.*?)\]: \[(.*)\]$)"),
-                                         QRegularExpression::MultilineOption);
-
-    const CommandResult r = runOnDevice(serial, {QStringLiteral("shell"), QStringLiteral("getprop")});
-    if (result)
-        *result = r;
-
-    QMap<QString, QString> props;
-    if (!r.ok())
-        return props;
-    const QString text = QString::fromUtf8(r.standardOutput).remove(QLatin1Char('\r'));
-    auto it = line.globalMatch(text);
-    while (it.hasNext()) {
-        const QRegularExpressionMatch match = it.next();
-        props.insert(match.captured(1), match.captured(2));
-    }
-    return props;
-}
-
-CommandResult Adb::push(const QString &serial, const QString &localPath, const QString &remotePath,
-                        int timeoutMs) const
-{
-    return runOnDevice(serial, {QStringLiteral("push"), localPath, remotePath}, timeoutMs);
-}
-
-CommandResult Adb::pull(const QString &serial, const QString &remotePath, const QString &localPath,
-                        int timeoutMs) const
-{
-    return runOnDevice(serial, {QStringLiteral("pull"), remotePath, localPath}, timeoutMs);
-}
-
-CommandResult Adb::install(const QString &serial, const QString &apkPath, const QStringList &options,
-                           int timeoutMs) const
-{
-    return checkInstall(runOnDevice(serial, installArgs(apkPath, options), timeoutMs));
-}
-
-CommandResult Adb::uninstall(const QString &serial, const QString &package, bool keepData) const
-{
-    QStringList args{QStringLiteral("uninstall")};
-    if (keepData)
-        args << QStringLiteral("-k");
-    args << package;
-    return rejectOnOutput(runOnDevice(serial, args, 60 * 1000), {QStringLiteral("Failure")});
-}
-
-QStringList Adb::packages(const QString &serial, PackageFilter filter, CommandResult *result) const
-{
-    QString command = QStringLiteral("pm list packages");
-    if (filter == PackageFilter::ThirdParty)
-        command += QStringLiteral(" -3");
-    else if (filter == PackageFilter::System)
-        command += QStringLiteral(" -s");
-
-    const CommandResult r = shell(serial, command, 30 * 1000);
-    if (result)
-        *result = r;
-
-    QStringList packages;
-    if (!r.ok())
-        return packages;
-    const QStringList lines = r.text().split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        const QLatin1String prefix("package:");
-        if (trimmed.startsWith(prefix))
-            packages << trimmed.mid(prefix.size());
-    }
-    packages.sort();
-    return packages;
-}
-
-QByteArray Adb::screenshot(const QString &serial, CommandResult *result) const
-{
-    // exec-out (unlike `shell`) leaves the binary stream untouched.
-    const CommandResult r = runOnDevice(serial, screenshotArgs(), kScreenshotTimeoutMs);
-    if (result)
-        *result = r;
-    return r.ok() ? r.standardOutput : QByteArray();
-}
-
-CommandResult Adb::keyEvent(const QString &serial, Key key) const
-{
-    return keyEvent(serial, static_cast<int>(key));
-}
-
-CommandResult Adb::keyEvent(const QString &serial, int keyCode) const
-{
-    return shell(serial, QStringLiteral("input keyevent %1").arg(keyCode));
-}
-
-CommandResult Adb::tap(const QString &serial, int x, int y) const
-{
-    return shell(serial, QStringLiteral("input tap %1 %2").arg(x).arg(y));
-}
-
-CommandResult Adb::swipe(const QString &serial, int x1, int y1, int x2, int y2, int durationMs) const
-{
-    return shell(serial, QStringLiteral("input swipe %1 %2 %3 %4 %5").arg(x1).arg(y1).arg(x2).arg(y2).arg(durationMs));
-}
-
-CommandResult Adb::inputText(const QString &serial, const QString &text) const
-{
-    QString escaped = text;
-    escaped.replace(QLatin1Char(' '), QLatin1String("%s")); // `input text` encodes spaces as %s
-    return shell(serial, QStringLiteral("input text ") + shellQuote(escaped));
-}
-
-// ---- non-blocking variants ----------------------------------------------------
-
-void Adb::connectDeviceAsync(const QString &address, Callback callback)
-{
-    runAsync(connectArgs(address), [callback = std::move(callback)](const CommandResult &result) {
-        if (callback)
-            callback(checkConnect(result));
-    }, kConnectTimeoutMs);
-}
-
-void Adb::androidSdkVersionAsync(const QString &serial, std::function<void(int)> callback)
-{
-    runAsync(deviceArgs(serial, {QStringLiteral("shell"), QStringLiteral("getprop"),
-                                 QStringLiteral("ro.build.version.sdk")}),
-             [callback = std::move(callback)](const CommandResult &result) {
-                 if (callback)
-                     callback(result.ok() ? result.text().toInt() : 0);
-             });
-}
-
-void Adb::shellAsync(const QString &serial, const QString &command, Callback callback, int timeoutMs)
-{
-    runAsync(deviceArgs(serial, {QStringLiteral("shell"), command}), std::move(callback), timeoutMs);
-}
-
-void Adb::installAsync(const QString &serial, const QString &apkPath, Callback callback,
-                       const QStringList &options, int timeoutMs)
-{
-    runAsync(deviceArgs(serial, installArgs(apkPath, options)),
-             [callback = std::move(callback)](const CommandResult &result) {
-                 if (callback)
-                     callback(checkInstall(result));
-             }, timeoutMs);
-}
-
-void Adb::pushAsync(const QString &serial, const QString &localPath, const QString &remotePath,
-                    Callback callback, int timeoutMs)
-{
-    runAsync(deviceArgs(serial, {QStringLiteral("push"), localPath, remotePath}), std::move(callback), timeoutMs);
-}
-
-void Adb::pullAsync(const QString &serial, const QString &remotePath, const QString &localPath,
-                    Callback callback, int timeoutMs)
-{
-    runAsync(deviceArgs(serial, {QStringLiteral("pull"), remotePath, localPath}), std::move(callback), timeoutMs);
-}
-
-void Adb::screenshotAsync(const QString &serial, Callback callback)
-{
-    runAsync(deviceArgs(serial, screenshotArgs()), std::move(callback), kScreenshotTimeoutMs);
-}
-
-// ---- port forwarding ----------------------------------------------------------
-
-CommandResult Adb::forward(const QString &serial, const QString &local, const QString &remote,
-                           bool noRebind) const
-{
-    QStringList args{QStringLiteral("forward")};
-    if (noRebind)
-        args << QStringLiteral("--no-rebind");
-    args << local << remote;
-    return runOnDevice(serial, args);
-}
-
-CommandResult Adb::removeForward(const QString &serial, const QString &local) const
-{
-    return runOnDevice(serial, {QStringLiteral("forward"), QStringLiteral("--remove"), local});
-}
-
-CommandResult Adb::removeAllForwards(const QString &serial) const
-{
-    return runOnDevice(serial, {QStringLiteral("forward"), QStringLiteral("--remove-all")});
-}
-
-CommandResult Adb::reverse(const QString &serial, const QString &remote, const QString &local,
-                           bool noRebind) const
-{
-    QStringList args{QStringLiteral("reverse")};
-    if (noRebind)
-        args << QStringLiteral("--no-rebind");
-    args << remote << local;
-    return runOnDevice(serial, args);
-}
-
-CommandResult Adb::removeReverse(const QString &serial, const QString &remote) const
-{
-    return runOnDevice(serial, {QStringLiteral("reverse"), QStringLiteral("--remove"), remote});
-}
-
-CommandResult Adb::removeAllReverses(const QString &serial) const
-{
-    return runOnDevice(serial, {QStringLiteral("reverse"), QStringLiteral("--remove-all")});
-}
-
-QString Adb::shellQuote(const QString &arg)
-{
-    QString quoted = arg;
-    quoted.replace(QLatin1Char('\''), QLatin1String("'\\''"));
-    return QLatin1Char('\'') + quoted + QLatin1Char('\'');
 }
 
 } // namespace QtScrcpy
