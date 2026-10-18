@@ -1,0 +1,4 @@
+signing/*.jar binary
+signing/*.p12 binary
+signing/*.pem -text
+signing/*.json -text
