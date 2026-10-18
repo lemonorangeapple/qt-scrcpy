@@ -245,7 +245,7 @@ void TstAdb::slowDeviceListIsRetriedQuietly()
     qputenv("QTSCRCPY_ADB_TIMEOUT_MS", "300");          // while we only wait 300 ms
     QSignalSpy errors(m_adb, &Adb::errorOccurred);
     m_adb->refreshDevices();
-    QTest::qWait(1500);
+    QTest::qWait(5500); // the first retry comes after a 4 s back-off
     // The first failures stay quiet, but the library keeps trying by itself.
     QCOMPARE(errors.count(), 0);
     const int calls = logContents().count(QStringLiteral("devices	-l"));
